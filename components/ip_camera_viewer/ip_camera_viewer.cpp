@@ -1464,6 +1464,33 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
       return false;
     }
 
+    // PLAY: do NOT bulk-read here. Right after PLAY the camera streams interleaved
+    // RTP ('$') on this same TCP socket; a recv() of many bytes would swallow part
+    // of the first RTP packet and desync the interleaved framing (no frames would
+    // ever assemble). Read ONLY the RTSP response - or nothing if the stream has
+    // already started - leaving all stream data for the RTP reader.
+    if (method == "PLAY") {
+      char first = 0;
+      if (recv(this->rtsp_socket_, &first, 1, MSG_PEEK) > 0 && first == '$') {
+        ESP_LOGI(TAG, "RTSP PLAY OK (stream already flowing)");
+        return true;
+      }
+      std::string play_resp;
+      char c;
+      int guard = 0;
+      while (play_resp.find("\r\n\r\n") == std::string::npos && guard++ < 4096) {
+        if (recv(this->rtsp_socket_, &c, 1, 0) <= 0)
+          break;
+        play_resp += c;
+      }
+      if (play_resp.find(" 200") == std::string::npos) {
+        ESP_LOGE(TAG, "RTSP PLAY failed: %s", play_resp.c_str());
+        return false;
+      }
+      ESP_LOGI(TAG, "RTSP PLAY OK");
+      return true;
+    }
+
     int len = recv(this->rtsp_socket_, response, sizeof(response) - 1, 0);
     if (len <= 0) {
       ESP_LOGE(TAG, "Failed to receive RTSP response");
@@ -1503,15 +1530,6 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
     }
 
     break;  // Non-401 response: stop retrying and evaluate below
-  }
-
-  // PLAY can return interleaved RTP data ('$', 0x24) instead of a parseable
-  // status line: some cameras start streaming immediately after PLAY. Since the
-  // session is already established (SETUP succeeded), seeing stream data rather
-  // than an "RTSP/1.0" status line means PLAY worked and the stream is flowing.
-  if (method == "PLAY" && resp_str.find("RTSP/1.0") == std::string::npos) {
-    ESP_LOGW(TAG, "PLAY: stream started before the response was parsed, continuing");
-    return true;
   }
 
   // Check status
