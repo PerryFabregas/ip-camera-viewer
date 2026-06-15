@@ -1466,6 +1466,15 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
     break;  // Non-401 response: stop retrying and evaluate below
   }
 
+  // PLAY can return interleaved RTP data ('$', 0x24) instead of a parseable
+  // status line: some cameras start streaming immediately after PLAY. Since the
+  // session is already established (SETUP succeeded), seeing stream data rather
+  // than an "RTSP/1.0" status line means PLAY worked and the stream is flowing.
+  if (method == "PLAY" && resp_str.find("RTSP/1.0") == std::string::npos) {
+    ESP_LOGW(TAG, "PLAY: stream started before the response was parsed, continuing");
+    return true;
+  }
+
   // Check status
   if (resp_str.find("200 OK") == std::string::npos) {
     ESP_LOGE(TAG, "RTSP %s failed: %s", method.c_str(), resp_str.c_str());
