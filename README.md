@@ -6,7 +6,7 @@ ESP32-P4 with hardware decoding and LVGL display.
 ## Features
 
 - **MJPEG support** - Hardware JPEG decoding optimized for network streams
-- **H264/RTSP support** - Software H264 decoding (Baseline/Main Profile)
+- **H264/RTSP support** - Software H264 decoding (Constrained Baseline profile only; see limitations)
 - **Hardware decoding** - ESP32-P4 hardware JPEG decoder (100 ms timeout)
 - **COM marker stripping** - ffmpeg/go2rtc MJPEG compatibility
 - **WiFi handling** - Automatic wait for the WiFi connection (15 s retry delay)
@@ -320,12 +320,15 @@ on_click:
 ip_camera_viewer:
   - id: security_cam_1
     url: "rtsp://username:password@192.168.1.56:554/stream2"
-    protocol: h264
+    protocol: rtsp   # "h264" is accepted as an alias
     width: 320
     height: 240
     canvas_id: security_canvas
     update_interval: 100ms
 ```
+
+> **Protocol values:** use `mjpeg` (HTTP MJPEG) or `rtsp` (RTSP/H.264). `h264`
+> is accepted as an alias for `rtsp`.
 
 ### RTSP authentication
 
@@ -344,11 +347,20 @@ go2rtc:
       - rtsp://username:password@192.168.1.56:554/stream1
 ```
 
-**H264 limitations:**
-- Supports **Baseline** and **Main Profile** only
-- **High Profile** (Tapo C500 default) is not supported
-- A large GOP can cause delays
-- Slower than MJPEG (software decoding)
+**H264 limitations (important):**
+- The ESP32-P4 has **no hardware H264 decoder**. Decoding is done in software by
+  Espressif's `esp_h264` (tinyH264), which supports the **Constrained Baseline
+  profile only**.
+- **Main and High profile streams cannot be decoded** — even though they play
+  fine in VLC (VLC ships a full decoder). Most IP cameras (Reolink, Hikvision,
+  Dahua, Tapo, ...) default to Main/High profile.
+- The component logs the detected profile at startup, e.g.
+  `H264 stream profile_idc=77 (Main)`, and warns when it is not Baseline.
+- Software decoding is also slower than MJPEG and a large GOP adds latency.
+
+**Recommended for non-Baseline cameras:** use **MJPEG via go2rtc** (decoded by the
+ESP32-P4 hardware JPEG decoder — fast and reliable), or have go2rtc/ffmpeg
+**transcode** the stream to H264 Baseline. See the go2rtc examples above.
 
 **Recommendation:** Use MJPEG via go2rtc for better performance!
 

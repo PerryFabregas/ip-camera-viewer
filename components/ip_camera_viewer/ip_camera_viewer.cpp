@@ -486,6 +486,15 @@ bool IPCameraViewer::connect_mjpeg_stream_() {
     return true;
   }
 
+  // The MJPEG path uses the HTTP client, which cannot handle an rtsp:// URL
+  // (the failure is the cryptic "No transport found"). Catch the mismatch early.
+  if (this->url_.rfind("http", 0) != 0) {
+    ESP_LOGE(TAG, "protocol is 'mjpeg' but the URL is not http(s): '%s'. For an rtsp:// URL use "
+                  "protocol: rtsp (or h264); for MJPEG use an http:// URL (e.g. via go2rtc).",
+             this->url_.c_str());
+    return false;
+  }
+
   esp_http_client_config_t config = {};
   config.url = this->url_.c_str();
   config.timeout_ms = 5000;
@@ -1268,6 +1277,27 @@ bool IPCameraViewer::connect_rtsp_stream_() {
       this->param_sets_sent_fua_ = false;
       if (this->has_sps_ && this->has_pps_)
         ESP_LOGI(TAG, "Loaded SPS (%u) + PPS (%u) from SDP sprop-parameter-sets", this->sps_len_, this->pps_len_);
+
+      // Inspect the SPS profile. The ESP32-P4 has NO hardware H.264 decoder; the
+      // software decoder (tinyH264) supports CONSTRAINED BASELINE profile only.
+      // Most IP cameras (Reolink, Hikvision, ...) stream Main/High profile, which
+      // cannot be decoded here even though it plays fine in VLC.
+      if (this->sps_len_ >= 8) {
+        uint8_t profile_idc = this->sps_cache_[5];  // [00 00 00 01][nal][profile_idc][flags][level]
+        uint8_t level_idc = this->sps_cache_[7];
+        const char *pname = profile_idc == 66 ? "Baseline" : profile_idc == 77 ? "Main"
+                            : profile_idc == 88 ? "Extended" : profile_idc == 100 ? "High"
+                            : profile_idc == 110 ? "High10" : profile_idc == 122 ? "High422"
+                            : profile_idc == 244 ? "High444" : "Unknown";
+        ESP_LOGI(TAG, "H264 stream profile_idc=%u (%s), level_idc=%u", profile_idc, pname, level_idc);
+        if (profile_idc != 66) {
+          ESP_LOGE(TAG, "This stream is H264 %s profile, but the ESP32-P4 software decoder "
+                        "(tinyH264) only supports BASELINE. It will NOT decode (VLC works because "
+                        "it has a full decoder).", pname);
+          ESP_LOGE(TAG, "Fix: use MJPEG via go2rtc (hardware JPEG decode, recommended), or have "
+                        "go2rtc/ffmpeg transcode the stream to H264 Baseline.");
+        }
+      }
     }
   }
 
@@ -1353,9 +1383,14 @@ void IPCameraViewer::disconnect_rtsp_stream_() {
       int flags = fcntl(this->rtsp_socket_, F_GETFL, 0);
       fcntl(this->rtsp_socket_, F_SETFL, flags & ~O_NONBLOCK);
 
-      char session_header[128];
-      snprintf(session_header, sizeof(session_header), "Session: %s\r\n", this->rtsp_session_.c_str());
-      this->send_rtsp_request_("TEARDOWN", this->url_, session_header);
+      // Best-effort TEARDOWN: send it but do not parse the reply. The socket
+      // still carries interleaved RTP data ('$'), so there is no clean RTSP
+      // response to read - trying would just log a spurious error.
+      std::string req = "TEARDOWN " + this->url_ + " RTSP/1.0\r\n" +
+                        "CSeq: " + std::to_string(this->cseq_++) + "\r\n" +
+                        this->build_rtsp_auth_header_("TEARDOWN", this->url_) +
+                        "Session: " + this->rtsp_session_ + "\r\n\r\n";
+      send(this->rtsp_socket_, req.data(), req.size(), 0);
     }
     close(this->rtsp_socket_);
     this->rtsp_socket_ = -1;

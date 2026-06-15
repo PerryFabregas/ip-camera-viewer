@@ -15,16 +15,34 @@ CONF_PROTOCOL = "protocol"
 ip_camera_viewer_ns = cg.esphome_ns.namespace("ip_camera_viewer")
 IPCameraViewer = ip_camera_viewer_ns.class_("IPCameraViewer", cg.Component)
 
+def _validate_url_protocol(config):
+    """Catch the common url/protocol mismatch at compile time."""
+    url = config[CONF_URL]
+    proto = config[CONF_PROTOCOL]
+    scheme = url.split("://", 1)[0].lower() if "://" in url else ""
+    if scheme == "rtsp" and proto == "mjpeg":
+        raise cv.Invalid(
+            "An 'rtsp://' URL requires 'protocol: rtsp' (or 'h264'). "
+            "'protocol: mjpeg' is only for http:// MJPEG streams (e.g. via go2rtc)."
+        )
+    if scheme in ("http", "https") and proto in ("rtsp", "h264"):
+        raise cv.Invalid(
+            "An 'http(s)://' URL is not valid with 'protocol: rtsp/h264'. "
+            "Use 'protocol: mjpeg' for http MJPEG streams, or an 'rtsp://' URL for RTSP."
+        )
+    return config
+
+
 # Single camera schema
-IP_CAMERA_VIEWER_SCHEMA = cv.Schema({
+IP_CAMERA_VIEWER_SCHEMA = cv.All(cv.Schema({
     cv.GenerateID(): cv.declare_id(IPCameraViewer),
     cv.Required(CONF_URL): cv.string,
     cv.Required(CONF_CANVAS_ID): cv.string,
     cv.Required(CONF_WIDTH): cv.int_range(min=16, max=1920),
     cv.Required(CONF_HEIGHT): cv.int_range(min=16, max=1080),
-    cv.Optional(CONF_PROTOCOL, default="mjpeg"): cv.one_of("mjpeg", "rtsp", lower=True),
+    cv.Optional(CONF_PROTOCOL, default="mjpeg"): cv.one_of("mjpeg", "rtsp", "h264", lower=True),
     cv.Optional(CONF_UPDATE_INTERVAL, default="100ms"): cv.positive_time_period_milliseconds,
-}).extend(cv.COMPONENT_SCHEMA)
+}).extend(cv.COMPONENT_SCHEMA), _validate_url_protocol)
 
 # Support multiple cameras as a list
 CONFIG_SCHEMA = cv.All(

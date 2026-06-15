@@ -35,7 +35,8 @@ class IPCameraViewer : public Component {
   void set_update_interval(uint32_t interval_ms) { this->update_interval_ = interval_ms; }
   void set_enabled(bool enabled) { this->enabled_ = enabled; }
   void set_protocol(const std::string &protocol) {
-    if (protocol == "rtsp") {
+    // "rtsp" and "h264" are aliases for the same RTSP/H.264 path
+    if (protocol == "rtsp" || protocol == "h264") {
       this->protocol_ = Protocol::RTSP;
     } else {
       this->protocol_ = Protocol::MJPEG;
