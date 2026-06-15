@@ -117,7 +117,15 @@ class IPCameraViewer : public Component {
   int rtp_socket_{-1};
   uint16_t rtp_port_{0};
   std::string rtsp_session_{};
-  std::string rtsp_auth_{};  // Base64 encoded credentials
+  std::string rtsp_auth_{};  // Base64 encoded credentials (Basic auth)
+  std::string rtsp_user_{};  // Username (for Digest auth)
+  std::string rtsp_pass_{};  // Password (for Digest auth)
+  // Digest auth challenge (parsed from a 401 WWW-Authenticate response)
+  std::string digest_realm_{};
+  std::string digest_nonce_{};
+  std::string digest_qop_{};
+  std::string digest_opaque_{};
+  uint32_t digest_nc_{0};
   int cseq_{1};
 
   // H264 decoder
@@ -164,6 +172,7 @@ class IPCameraViewer : public Component {
   void disconnect_rtsp_stream_();
   bool init_h264_decoder_();
   bool send_rtsp_request_(const std::string &method, const std::string &url, const std::string &extra_headers = "", std::string *response_body = nullptr);
+  std::string build_rtsp_auth_header_(const std::string &method, const std::string &uri);  // Basic or Digest
   bool parse_rtsp_response_(std::string &response);
   bool fetch_rtp_frame_();
   bool decode_h264_to_yuv_();

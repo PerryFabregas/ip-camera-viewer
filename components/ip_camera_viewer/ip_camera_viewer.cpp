@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include "mbedtls/base64.h"
+#include "mbedtls/md5.h"
 #include "esp_task_wdt.h"
 
 namespace esphome {
@@ -1065,17 +1066,36 @@ bool IPCameraViewer::connect_rtsp_stream_() {
   size_t authority_end = url.find('/');
   std::string authority = (authority_end == std::string::npos) ? url : url.substr(0, authority_end);
   size_t at_pos = authority.rfind('@');
+  // Reset any previous auth state (important on reconnect: the nonce is stale)
+  this->rtsp_auth_.clear();
+  this->rtsp_user_.clear();
+  this->rtsp_pass_.clear();
+  this->digest_realm_.clear();
+  this->digest_nonce_.clear();
+  this->digest_qop_.clear();
+  this->digest_opaque_.clear();
+  this->digest_nc_ = 0;
   if (at_pos != std::string::npos) {
     credentials = url.substr(0, at_pos);
     url = url.substr(at_pos + 1);  // Remove credentials from URL
 
-    // Encode credentials to Base64 for Basic auth
+    // Split user:pass (used for Digest auth). The password may contain ':'? No -
+    // the first ':' separates user from password per RFC userinfo.
+    size_t colon = credentials.find(':');
+    if (colon != std::string::npos) {
+      this->rtsp_user_ = credentials.substr(0, colon);
+      this->rtsp_pass_ = credentials.substr(colon + 1);
+    } else {
+      this->rtsp_user_ = credentials;
+    }
+
+    // Encode credentials to Base64 for Basic auth (fallback)
     size_t out_len = 0;
     unsigned char base64_buf[256];
     if (mbedtls_base64_encode(base64_buf, sizeof(base64_buf), &out_len,
                               (const unsigned char *)credentials.c_str(), credentials.length()) == 0) {
       this->rtsp_auth_ = std::string((char *)base64_buf, out_len);
-      ESP_LOGI(TAG, "RTSP credentials encoded for Basic auth");
+      ESP_LOGI(TAG, "RTSP credentials parsed (Basic + Digest supported)");
     }
   }
 
@@ -1314,52 +1334,140 @@ void IPCameraViewer::disconnect_rtsp_stream_() {
   this->h264_data_len_ = 0;
 }
 
+// Compute the lowercase hex MD5 of a string (used for Digest auth)
+static std::string md5_hex(const std::string &data) {
+  unsigned char digest[16];
+  mbedtls_md5(reinterpret_cast<const unsigned char *>(data.data()), data.size(), digest);
+  static const char *const hexd = "0123456789abcdef";
+  std::string out;
+  out.reserve(32);
+  for (int i = 0; i < 16; i++) {
+    out += hexd[digest[i] >> 4];
+    out += hexd[digest[i] & 0x0F];
+  }
+  return out;
+}
+
+// Extract a parameter value from a WWW-Authenticate header, e.g. realm="...".
+// Handles both quoted ("value") and bare (value) forms, matching only on a
+// token boundary so that, e.g., "nonce" does not match inside "cnonce".
+static std::string digest_param(const std::string &header, const std::string &key) {
+  const std::string needle = key + "=";
+  size_t pos = header.find(needle);
+  while (pos != std::string::npos) {
+    char before = (pos == 0) ? ' ' : header[pos - 1];
+    if (before == ' ' || before == ',' || before == '\t')
+      break;
+    pos = header.find(needle, pos + 1);
+  }
+  if (pos == std::string::npos)
+    return "";
+  pos += needle.size();
+  if (pos >= header.size())
+    return "";
+  if (header[pos] == '"') {
+    size_t end = header.find('"', pos + 1);
+    if (end == std::string::npos)
+      return "";
+    return header.substr(pos + 1, end - pos - 1);
+  }
+  size_t end = header.find_first_of(",\r\n ", pos);
+  if (end == std::string::npos)
+    end = header.size();
+  return header.substr(pos, end - pos);
+}
+
+// Build the Authorization header line (with trailing CRLF). Uses Digest if a
+// challenge has been received, otherwise falls back to Basic. Empty if no creds.
+std::string IPCameraViewer::build_rtsp_auth_header_(const std::string &method, const std::string &uri) {
+  if (!this->digest_nonce_.empty() && !this->rtsp_user_.empty()) {
+    std::string ha1 = md5_hex(this->rtsp_user_ + ":" + this->digest_realm_ + ":" + this->rtsp_pass_);
+    std::string ha2 = md5_hex(method + ":" + uri);
+    std::string resp;
+    std::string hdr = "Authorization: Digest username=\"" + this->rtsp_user_ + "\", realm=\"" +
+                      this->digest_realm_ + "\", nonce=\"" + this->digest_nonce_ + "\", uri=\"" + uri + "\"";
+    if (!this->digest_qop_.empty()) {
+      this->digest_nc_++;
+      char nc[9];
+      snprintf(nc, sizeof(nc), "%08x", this->digest_nc_);
+      std::string cnonce = md5_hex(std::to_string(millis()) + ":" + this->rtsp_user_).substr(0, 16);
+      resp = md5_hex(ha1 + ":" + this->digest_nonce_ + ":" + nc + ":" + cnonce + ":auth:" + ha2);
+      hdr += ", qop=auth, nc=" + std::string(nc) + ", cnonce=\"" + cnonce + "\"";
+    } else {
+      resp = md5_hex(ha1 + ":" + this->digest_nonce_ + ":" + ha2);
+    }
+    hdr += ", response=\"" + resp + "\"";
+    if (!this->digest_opaque_.empty())
+      hdr += ", opaque=\"" + this->digest_opaque_ + "\"";
+    hdr += "\r\n";
+    return hdr;
+  }
+  if (!this->rtsp_auth_.empty())
+    return "Authorization: Basic " + this->rtsp_auth_ + "\r\n";
+  return "";
+}
+
 bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::string &url,
                                        const std::string &extra_headers, std::string *response_body) {
-  char request[768];
+  char response[4096];  // Large enough for SDP content
+  std::string resp_str;
 
-  // Build Authorization header if credentials available
-  std::string auth_header;
-  if (!this->rtsp_auth_.empty()) {
-    auth_header = "Authorization: Basic " + this->rtsp_auth_ + "\r\n";
+  // Up to 2 attempts: the first may return 401 with a Digest challenge, which we
+  // parse and answer on the second attempt.
+  for (int attempt = 0; attempt < 2; attempt++) {
+    std::string auth_header = this->build_rtsp_auth_header_(method, url);
+
+    // Build the request with std::string (a Digest header can exceed 768 bytes)
+    std::string request = method + " " + url + " RTSP/1.0\r\n" +
+                          "CSeq: " + std::to_string(this->cseq_++) + "\r\n" +
+                          auth_header + extra_headers + "\r\n";
+
+    if (send(this->rtsp_socket_, request.data(), request.size(), 0) < 0) {
+      ESP_LOGE(TAG, "Failed to send RTSP %s", method.c_str());
+      return false;
+    }
+
+    int len = recv(this->rtsp_socket_, response, sizeof(response) - 1, 0);
+    if (len <= 0) {
+      ESP_LOGE(TAG, "Failed to receive RTSP response");
+      return false;
+    }
+    response[len] = '\0';
+    resp_str.assign(response, len);
+
+    // Handle 401 Unauthorized
+    if (resp_str.find(" 401") != std::string::npos) {
+      if (attempt == 0 && !this->rtsp_user_.empty() && resp_str.find("Digest") != std::string::npos) {
+        // Parse the Digest challenge and retry with a computed response
+        this->digest_realm_ = digest_param(resp_str, "realm");
+        this->digest_nonce_ = digest_param(resp_str, "nonce");
+        this->digest_qop_ = digest_param(resp_str, "qop");
+        this->digest_opaque_ = digest_param(resp_str, "opaque");
+        this->digest_nc_ = 0;
+        ESP_LOGI(TAG, "RTSP %s: got Digest challenge, retrying with authentication", method.c_str());
+        continue;
+      }
+      ESP_LOGE(TAG, "RTSP %s unauthorized - check username/password (camera may require Digest)", method.c_str());
+      return false;
+    }
+
+    break;  // Non-401 response: stop retrying and evaluate below
   }
-
-  snprintf(request, sizeof(request),
-           "%s %s RTSP/1.0\r\n"
-           "CSeq: %d\r\n"
-           "%s"
-           "%s"
-           "\r\n",
-           method.c_str(), url.c_str(), this->cseq_++, auth_header.c_str(), extra_headers.c_str());
-
-  if (send(this->rtsp_socket_, request, strlen(request), 0) < 0) {
-    ESP_LOGE(TAG, "Failed to send RTSP %s", method.c_str());
-    return false;
-  }
-
-  // Receive response
-  char response[4096];  // Increased size for SDP content
-  int len = recv(this->rtsp_socket_, response, sizeof(response) - 1, 0);
-  if (len <= 0) {
-    ESP_LOGE(TAG, "Failed to receive RTSP response");
-    return false;
-  }
-  response[len] = '\0';
 
   // Check status
-  if (strstr(response, "200 OK") == nullptr) {
-    ESP_LOGE(TAG, "RTSP %s failed: %s", method.c_str(), response);
+  if (resp_str.find("200 OK") == std::string::npos) {
+    ESP_LOGE(TAG, "RTSP %s failed: %s", method.c_str(), resp_str.c_str());
     return false;
   }
 
   // Extract Session ID from SETUP response
   if (method == "SETUP") {
-    char *session = strstr(response, "Session: ");
-    if (session) {
-      session += 9;
-      char *end = strpbrk(session, ";\r\n");
-      if (end) {
-        this->rtsp_session_ = std::string(session, end - session);
+    size_t spos = resp_str.find("Session: ");
+    if (spos != std::string::npos) {
+      spos += 9;
+      size_t end = resp_str.find_first_of(";\r\n", spos);
+      if (end != std::string::npos) {
+        this->rtsp_session_ = resp_str.substr(spos, end - spos);
         ESP_LOGI(TAG, "RTSP Session: %s", this->rtsp_session_.c_str());
       }
     }
@@ -1367,7 +1475,7 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
 
   // If caller wants the response body (for SDP parsing)
   if (response_body != nullptr) {
-    *response_body = std::string(response);
+    *response_body = resp_str;
   }
 
   ESP_LOGI(TAG, "RTSP %s OK", method.c_str());

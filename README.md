@@ -327,6 +327,14 @@ ip_camera_viewer:
     update_interval: 100ms
 ```
 
+### RTSP authentication
+
+Credentials are taken from the URL (`rtsp://user:pass@host:port/path`). Both
+**Basic** and **Digest** authentication are supported, and Digest is detected
+automatically from the camera's `401` challenge — so cameras that only accept
+Digest (Reolink, Hikvision, Dahua, many others) work without a proxy. A password
+containing `@` is handled correctly.
+
 ### go2rtc configuration (H264 proxy)
 
 ```yaml
