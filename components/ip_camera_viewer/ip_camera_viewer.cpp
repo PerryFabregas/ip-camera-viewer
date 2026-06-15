@@ -1437,17 +1437,31 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
 
     // Handle 401 Unauthorized
     if (resp_str.find(" 401") != std::string::npos) {
-      if (attempt == 0 && !this->rtsp_user_.empty() && resp_str.find("Digest") != std::string::npos) {
+      bool has_digest = resp_str.find("Digest") != std::string::npos ||
+                        resp_str.find("digest") != std::string::npos;
+      if (attempt == 0 && !this->rtsp_user_.empty() && has_digest) {
         // Parse the Digest challenge and retry with a computed response
         this->digest_realm_ = digest_param(resp_str, "realm");
         this->digest_nonce_ = digest_param(resp_str, "nonce");
         this->digest_qop_ = digest_param(resp_str, "qop");
         this->digest_opaque_ = digest_param(resp_str, "opaque");
         this->digest_nc_ = 0;
-        ESP_LOGI(TAG, "RTSP %s: got Digest challenge, retrying with authentication", method.c_str());
+        ESP_LOGI(TAG, "RTSP %s: got Digest challenge (realm=\"%s\"), retrying with authentication",
+                 method.c_str(), this->digest_realm_.c_str());
         continue;
       }
-      ESP_LOGE(TAG, "RTSP %s unauthorized - check username/password (camera may require Digest)", method.c_str());
+      // Could not authenticate: give a precise reason to help diagnosis
+      if (this->rtsp_user_.empty()) {
+        ESP_LOGE(TAG, "RTSP %s 401: the camera requires authentication but no credentials were "
+                      "provided. Use a URL like rtsp://user:pass@host:port/path", method.c_str());
+      } else {
+        size_t wpos = resp_str.find("WWW-Authenticate:");
+        std::string www = (wpos != std::string::npos)
+                              ? resp_str.substr(wpos, resp_str.find('\n', wpos) - wpos)
+                              : std::string("(no WWW-Authenticate header)");
+        ESP_LOGE(TAG, "RTSP %s 401 unauthorized (wrong user/password, or unsupported scheme). "
+                      "Challenge: %s", method.c_str(), www.c_str());
+      }
       return false;
     }
 
