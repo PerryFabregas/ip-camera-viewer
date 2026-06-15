@@ -1232,56 +1232,54 @@ bool IPCameraViewer::connect_rtsp_stream_() {
     return false;
   }
 
-  // Parse SDP to get control URL for video track
+  // Parse SDP to get the control URL for the VIDEO media. Cameras often place a
+  // session-level "a=control:*" before the per-track control, so we must look
+  // for the control that belongs to the "m=video" section, not just the first one.
   std::string control_url = full_url;
-  size_t control_pos = sdp_response.find("a=control:");
+  size_t mvideo = sdp_response.find("m=video");
+  size_t control_pos = sdp_response.find("a=control:", mvideo != std::string::npos ? mvideo : 0);
+
+  // Make sure the control we found is still inside the video section (before the
+  // next "m=" media line); otherwise fall back to the first control in the SDP.
+  if (control_pos != std::string::npos && mvideo != std::string::npos) {
+    size_t next_m = sdp_response.find("\nm=", mvideo + 1);
+    if (next_m != std::string::npos && control_pos > next_m)
+      control_pos = std::string::npos;
+  }
+  if (control_pos == std::string::npos)
+    control_pos = sdp_response.find("a=control:");
+
   if (control_pos != std::string::npos) {
-    size_t start = control_pos + 10; // Length of "a=control:"
-    size_t end = sdp_response.find('\r', start);
-    if (end == std::string::npos) {
-      end = sdp_response.find('\n', start);
+    size_t start = control_pos + 10;  // length of "a=control:"
+    size_t end = sdp_response.find_first_of("\r\n", start);
+    std::string control = sdp_response.substr(start, (end == std::string::npos ? sdp_response.size() : end) - start);
+
+    // Remove ALL whitespace characters (spaces, tabs, newlines)
+    control.erase(std::remove_if(control.begin(), control.end(),
+                                 [](unsigned char c) { return std::isspace(c); }),
+                  control.end());
+
+    ESP_LOGI(TAG, "SDP control attribute (cleaned): '%s'", control.c_str());
+
+    if (control.empty() || control == "*") {
+      // Aggregate control: use the DESCRIBE URL as-is
+      control_url = full_url;
+    } else if (control.find("://") != std::string::npos) {
+      // Absolute URL
+      control_url = control;
+    } else if (control[0] == '/') {
+      // Relative to server root
+      size_t scheme_end = full_url.find("://");
+      size_t path_start = (scheme_end != std::string::npos) ? full_url.find('/', scheme_end + 3) : std::string::npos;
+      control_url = (path_start != std::string::npos) ? full_url.substr(0, path_start) + control : full_url + control;
+    } else {
+      // Relative to the current path
+      control_url = full_url + (full_url.back() == '/' ? "" : "/") + control;
     }
-    if (end != std::string::npos) {
-      std::string control = sdp_response.substr(start, end - start);
-
-      // Remove ALL whitespace characters (spaces, tabs, newlines) from the string
-      control.erase(std::remove_if(control.begin(), control.end(),
-                                   [](unsigned char c) { return std::isspace(c); }),
-                   control.end());
-
-      ESP_LOGI(TAG, "SDP control attribute (cleaned): '%s'", control.c_str());
-
-      // If control is a relative URL, append to base URL
-      if (control.empty()) {
-        control_url = full_url;
-      } else if (control.find("://") != std::string::npos) {
-        // Absolute URL
-        control_url = control;
-      } else if (control[0] == '/') {
-        // Relative to server root
-        size_t scheme_end = full_url.find("://");
-        if (scheme_end != std::string::npos) {
-          size_t path_start = full_url.find('/', scheme_end + 3);
-          if (path_start != std::string::npos) {
-            control_url = full_url.substr(0, path_start) + control;
-          } else {
-            control_url = full_url + control;
-          }
-        }
-      } else {
-        // Relative to current path - append to full_url
-        if (full_url.back() == '/') {
-          control_url = full_url + control;
-        } else {
-          control_url = full_url + "/" + control;
-        }
-      }
-      ESP_LOGI(TAG, "Using control URL from SDP: %s", control_url.c_str());
-    }
+    ESP_LOGI(TAG, "Using control URL from SDP: %s", control_url.c_str());
   } else {
-    // Try common fallbacks
-    ESP_LOGW(TAG, "No control URL in SDP, trying common patterns...");
-    control_url = full_url; // Some cameras use the base URL
+    ESP_LOGW(TAG, "No control URL in SDP, using base URL");
+    control_url = full_url;
   }
 
   // SETUP with TCP interleaved transport
@@ -1437,17 +1435,31 @@ bool IPCameraViewer::send_rtsp_request_(const std::string &method, const std::st
 
     // Handle 401 Unauthorized
     if (resp_str.find(" 401") != std::string::npos) {
-      if (attempt == 0 && !this->rtsp_user_.empty() && resp_str.find("Digest") != std::string::npos) {
+      bool has_digest = resp_str.find("Digest") != std::string::npos ||
+                        resp_str.find("digest") != std::string::npos;
+      if (attempt == 0 && !this->rtsp_user_.empty() && has_digest) {
         // Parse the Digest challenge and retry with a computed response
         this->digest_realm_ = digest_param(resp_str, "realm");
         this->digest_nonce_ = digest_param(resp_str, "nonce");
         this->digest_qop_ = digest_param(resp_str, "qop");
         this->digest_opaque_ = digest_param(resp_str, "opaque");
         this->digest_nc_ = 0;
-        ESP_LOGI(TAG, "RTSP %s: got Digest challenge, retrying with authentication", method.c_str());
+        ESP_LOGI(TAG, "RTSP %s: got Digest challenge (realm=\"%s\"), retrying with authentication",
+                 method.c_str(), this->digest_realm_.c_str());
         continue;
       }
-      ESP_LOGE(TAG, "RTSP %s unauthorized - check username/password (camera may require Digest)", method.c_str());
+      // Could not authenticate: give a precise reason to help diagnosis
+      if (this->rtsp_user_.empty()) {
+        ESP_LOGE(TAG, "RTSP %s 401: the camera requires authentication but no credentials were "
+                      "provided. Use a URL like rtsp://user:pass@host:port/path", method.c_str());
+      } else {
+        size_t wpos = resp_str.find("WWW-Authenticate:");
+        std::string www = (wpos != std::string::npos)
+                              ? resp_str.substr(wpos, resp_str.find('\n', wpos) - wpos)
+                              : std::string("(no WWW-Authenticate header)");
+        ESP_LOGE(TAG, "RTSP %s 401 unauthorized (wrong user/password, or unsupported scheme). "
+                      "Challenge: %s", method.c_str(), www.c_str());
+      }
       return false;
     }
 
