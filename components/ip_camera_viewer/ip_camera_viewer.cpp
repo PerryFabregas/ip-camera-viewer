@@ -486,6 +486,15 @@ bool IPCameraViewer::connect_mjpeg_stream_() {
     return true;
   }
 
+  // The MJPEG path uses the HTTP client, which cannot handle an rtsp:// URL
+  // (the failure is the cryptic "No transport found"). Catch the mismatch early.
+  if (this->url_.rfind("http", 0) != 0) {
+    ESP_LOGE(TAG, "protocol is 'mjpeg' but the URL is not http(s): '%s'. For an rtsp:// URL use "
+                  "protocol: rtsp (or h264); for MJPEG use an http:// URL (e.g. via go2rtc).",
+             this->url_.c_str());
+    return false;
+  }
+
   esp_http_client_config_t config = {};
   config.url = this->url_.c_str();
   config.timeout_ms = 5000;
