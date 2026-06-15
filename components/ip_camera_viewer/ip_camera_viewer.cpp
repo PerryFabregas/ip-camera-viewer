@@ -1268,6 +1268,27 @@ bool IPCameraViewer::connect_rtsp_stream_() {
       this->param_sets_sent_fua_ = false;
       if (this->has_sps_ && this->has_pps_)
         ESP_LOGI(TAG, "Loaded SPS (%u) + PPS (%u) from SDP sprop-parameter-sets", this->sps_len_, this->pps_len_);
+
+      // Inspect the SPS profile. The ESP32-P4 has NO hardware H.264 decoder; the
+      // software decoder (tinyH264) supports CONSTRAINED BASELINE profile only.
+      // Most IP cameras (Reolink, Hikvision, ...) stream Main/High profile, which
+      // cannot be decoded here even though it plays fine in VLC.
+      if (this->sps_len_ >= 8) {
+        uint8_t profile_idc = this->sps_cache_[5];  // [00 00 00 01][nal][profile_idc][flags][level]
+        uint8_t level_idc = this->sps_cache_[7];
+        const char *pname = profile_idc == 66 ? "Baseline" : profile_idc == 77 ? "Main"
+                            : profile_idc == 88 ? "Extended" : profile_idc == 100 ? "High"
+                            : profile_idc == 110 ? "High10" : profile_idc == 122 ? "High422"
+                            : profile_idc == 244 ? "High444" : "Unknown";
+        ESP_LOGI(TAG, "H264 stream profile_idc=%u (%s), level_idc=%u", profile_idc, pname, level_idc);
+        if (profile_idc != 66) {
+          ESP_LOGE(TAG, "This stream is H264 %s profile, but the ESP32-P4 software decoder "
+                        "(tinyH264) only supports BASELINE. It will NOT decode (VLC works because "
+                        "it has a full decoder).", pname);
+          ESP_LOGE(TAG, "Fix: use MJPEG via go2rtc (hardware JPEG decode, recommended), or have "
+                        "go2rtc/ffmpeg transcode the stream to H264 Baseline.");
+        }
+      }
     }
   }
 
