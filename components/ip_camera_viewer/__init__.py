@@ -22,7 +22,7 @@ IP_CAMERA_VIEWER_SCHEMA = cv.Schema({
     cv.Required(CONF_CANVAS_ID): cv.string,
     cv.Required(CONF_WIDTH): cv.int_range(min=16, max=1920),
     cv.Required(CONF_HEIGHT): cv.int_range(min=16, max=1080),
-    cv.Optional(CONF_PROTOCOL, default="mjpeg"): cv.one_of("mjpeg", "rtsp", lower=True),
+    cv.Optional(CONF_PROTOCOL, default="mjpeg"): cv.one_of("mjpeg", "rtsp", "h264", lower=True),
     cv.Optional(CONF_UPDATE_INTERVAL, default="100ms"): cv.positive_time_period_milliseconds,
 }).extend(cv.COMPONENT_SCHEMA)
 

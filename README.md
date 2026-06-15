@@ -320,12 +320,15 @@ on_click:
 ip_camera_viewer:
   - id: security_cam_1
     url: "rtsp://username:password@192.168.1.56:554/stream2"
-    protocol: h264
+    protocol: rtsp   # "h264" is accepted as an alias
     width: 320
     height: 240
     canvas_id: security_canvas
     update_interval: 100ms
 ```
+
+> **Protocol values:** use `mjpeg` (HTTP MJPEG) or `rtsp` (RTSP/H.264). `h264`
+> is accepted as an alias for `rtsp`.
 
 ### RTSP authentication
 

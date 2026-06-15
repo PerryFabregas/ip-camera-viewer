@@ -1353,9 +1353,14 @@ void IPCameraViewer::disconnect_rtsp_stream_() {
       int flags = fcntl(this->rtsp_socket_, F_GETFL, 0);
       fcntl(this->rtsp_socket_, F_SETFL, flags & ~O_NONBLOCK);
 
-      char session_header[128];
-      snprintf(session_header, sizeof(session_header), "Session: %s\r\n", this->rtsp_session_.c_str());
-      this->send_rtsp_request_("TEARDOWN", this->url_, session_header);
+      // Best-effort TEARDOWN: send it but do not parse the reply. The socket
+      // still carries interleaved RTP data ('$'), so there is no clean RTSP
+      // response to read - trying would just log a spurious error.
+      std::string req = "TEARDOWN " + this->url_ + " RTSP/1.0\r\n" +
+                        "CSeq: " + std::to_string(this->cseq_++) + "\r\n" +
+                        this->build_rtsp_auth_header_("TEARDOWN", this->url_) +
+                        "Session: " + this->rtsp_session_ + "\r\n\r\n";
+      send(this->rtsp_socket_, req.data(), req.size(), 0);
     }
     close(this->rtsp_socket_);
     this->rtsp_socket_ = -1;
