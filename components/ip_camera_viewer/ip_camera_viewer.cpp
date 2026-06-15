@@ -1232,6 +1232,45 @@ bool IPCameraViewer::connect_rtsp_stream_() {
     return false;
   }
 
+  // Pre-load SPS/PPS from the SDP (sprop-parameter-sets) so the decoder always
+  // has its parameter sets, even if the camera only delivers them out-of-band or
+  // via STAP-A. This is the most reliable source.
+  {
+    size_t sp = sdp_response.find("sprop-parameter-sets=");
+    if (sp != std::string::npos) {
+      sp += 21;  // strlen("sprop-parameter-sets=")
+      size_t end = sdp_response.find_first_of(";\r\n", sp);
+      std::string sprop = sdp_response.substr(sp, (end == std::string::npos ? sdp_response.size() : end) - sp);
+      size_t comma = sprop.find(',');
+      std::string sps_b64 = (comma == std::string::npos) ? sprop : sprop.substr(0, comma);
+      std::string pps_b64 = (comma == std::string::npos) ? std::string() : sprop.substr(comma + 1);
+
+      auto load = [](const std::string &b64, uint8_t *cache, size_t cache_size, size_t &out_len, bool &has) {
+        if (b64.empty())
+          return;
+        unsigned char tmp[256];
+        size_t olen = 0;
+        if (mbedtls_base64_decode(tmp, sizeof(tmp), &olen, (const unsigned char *) b64.c_str(), b64.size()) == 0 &&
+            olen > 0 && olen + 4 <= cache_size) {
+          out_len = 0;
+          cache[out_len++] = 0x00;
+          cache[out_len++] = 0x00;
+          cache[out_len++] = 0x00;
+          cache[out_len++] = 0x01;
+          memcpy(cache + out_len, tmp, olen);
+          out_len += olen;
+          has = true;
+        }
+      };
+      load(sps_b64, this->sps_cache_, sizeof(this->sps_cache_), this->sps_len_, this->has_sps_);
+      load(pps_b64, this->pps_cache_, sizeof(this->pps_cache_), this->pps_len_, this->has_pps_);
+      this->param_sets_sent_ = false;
+      this->param_sets_sent_fua_ = false;
+      if (this->has_sps_ && this->has_pps_)
+        ESP_LOGI(TAG, "Loaded SPS (%u) + PPS (%u) from SDP sprop-parameter-sets", this->sps_len_, this->pps_len_);
+    }
+  }
+
   // Parse SDP to get the control URL for the VIDEO media. Cameras often place a
   // session-level "a=control:*" before the per-track control, so we must look
   // for the control that belongs to the "m=video" section, not just the first one.
@@ -1688,6 +1727,48 @@ bool IPCameraViewer::fetch_rtp_frame_() {
           ESP_LOGI(TAG, "Frame #%u: NAL type %u (%s), size %u bytes",
                    frame_count, nal_type, frame_type, nal_len);
         }
+      }
+    } else if (nal_type == 24) {
+      // STAP-A: a single RTP packet aggregating several NAL units, commonly used
+      // to carry SPS + PPS together. Layout: [STAP-A hdr][size(2)][NAL]...[size(2)][NAL]
+      int offset = 1;  // skip the STAP-A header byte
+      while (offset + 2 <= nal_len) {
+        uint16_t unit_size = (nal_data[offset] << 8) | nal_data[offset + 1];
+        offset += 2;
+        if (unit_size == 0 || offset + unit_size > nal_len)
+          break;
+        uint8_t *unit = nal_data + offset;
+        uint8_t utype = unit[0] & 0x1F;
+        if (utype == 7 && unit_size + 4 <= (int) sizeof(this->sps_cache_)) {
+          this->sps_len_ = 0;
+          this->sps_cache_[this->sps_len_++] = 0x00;
+          this->sps_cache_[this->sps_len_++] = 0x00;
+          this->sps_cache_[this->sps_len_++] = 0x00;
+          this->sps_cache_[this->sps_len_++] = 0x01;
+          memcpy(this->sps_cache_ + this->sps_len_, unit, unit_size);
+          this->sps_len_ += unit_size;
+          this->has_sps_ = true;
+          ESP_LOGI(TAG, "Cached SPS from STAP-A: %u bytes", this->sps_len_);
+        } else if (utype == 8 && unit_size + 4 <= (int) sizeof(this->pps_cache_)) {
+          this->pps_len_ = 0;
+          this->pps_cache_[this->pps_len_++] = 0x00;
+          this->pps_cache_[this->pps_len_++] = 0x00;
+          this->pps_cache_[this->pps_len_++] = 0x00;
+          this->pps_cache_[this->pps_len_++] = 0x01;
+          memcpy(this->pps_cache_ + this->pps_len_, unit, unit_size);
+          this->pps_len_ += unit_size;
+          this->has_pps_ = true;
+          ESP_LOGI(TAG, "Cached PPS from STAP-A: %u bytes", this->pps_len_);
+        } else if (this->h264_data_len_ + unit_size + 4 < this->h264_buffer_size_) {
+          // Any other aggregated NAL (e.g. SEI): append with a start code
+          this->h264_buffer_[this->h264_data_len_++] = 0x00;
+          this->h264_buffer_[this->h264_data_len_++] = 0x00;
+          this->h264_buffer_[this->h264_data_len_++] = 0x00;
+          this->h264_buffer_[this->h264_data_len_++] = 0x01;
+          memcpy(this->h264_buffer_ + this->h264_data_len_, unit, unit_size);
+          this->h264_data_len_ += unit_size;
+        }
+        offset += unit_size;
       }
     } else if (nal_type == 28) {
       // FU-A (Fragmentation Unit)
