@@ -136,14 +136,18 @@ bool H264HpDecoder::get_frame(DecodedFrame *out) {
   out->y = f.samples[0];
   out->cb = f.samples[1];
   out->cr = f.samples[2];
-  // Dimensions utiles dérivées du crop. edge264 expose frame_crop_offsets
-  // {top,right,bottom,left} relatif au cadre macrobloc 16x16.
-  // NOTE: les champs exacts width/height/stride dépendent de la version
-  // d'edge264 vendorisée — à mapper précisément lors de l'intégration (README).
-  out->width = 0;
-  out->height = 0;
-  out->stride_y = 0;
-  out->stride_c = 0;
+  // frame_crop_offsets = {top, right, bottom, left} (en pixels). La taille codée
+  // (width_Y/height_Y) est alignée macrobloc ; on retire le crop pour la taille
+  // d'affichage. Les plans pointent sur l'origine codée ; pour des flux caméra
+  // le crop gauche/haut est généralement nul (seuls bas/droite alignent au MB).
+  const int crop_top = f.frame_crop_offsets[0];
+  const int crop_right = f.frame_crop_offsets[1];
+  const int crop_bottom = f.frame_crop_offsets[2];
+  const int crop_left = f.frame_crop_offsets[3];
+  out->width = f.width_Y - crop_left - crop_right;
+  out->height = f.height_Y - crop_top - crop_bottom;
+  out->stride_y = f.stride_Y;
+  out->stride_c = f.stride_C;
   return true;
 #else
   (void) out;
