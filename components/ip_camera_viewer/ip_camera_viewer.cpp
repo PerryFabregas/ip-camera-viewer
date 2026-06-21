@@ -459,7 +459,7 @@ bool IPCameraViewer::init_jpeg_decoder_() {
 bool IPCameraViewer::init_h264_decoder_() {
   esp_h264_dec_cfg_sw_t dec_cfg = {};
   dec_cfg.pic_type = ESP_H264_RAW_FMT_I420;
-  dec_cfg.profile_idc = ESP_H264_PROFILE_AUTO;  // openh264 supports all profiles - auto-detect
+  dec_cfg.profile_idc = ESP_H264_PROFILE_AUTO;  // NB: esp_h264_dec_sw routes to tinyH264/h264bsd (Baseline only)
 
   esp_h264_err_t ret = esp_h264_dec_sw_new(&dec_cfg, &this->h264_decoder_);
   if (ret != ESP_H264_ERR_OK) {
@@ -473,7 +473,10 @@ bool IPCameraViewer::init_h264_decoder_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "H264 decoder initialized (openh264 supports Baseline/Main/High profiles)");
+  // Truth: the bundled libopenh264.a is encoder-only; decoding goes through
+  // tinyH264/h264bsd = CONSTRAINED BASELINE only. Main/High needs the edge264
+  // (h264_hp) path. Don't claim Main/High here.
+  ESP_LOGI(TAG, "H264 decoder initialized (tinyH264/h264bsd — Baseline profile only)");
   return true;
 }
 
