@@ -29,7 +29,9 @@ cd "$(dirname "$0")"
 CLANG="${CLANG:-clang}"                 # esp-clang (dans le PATH après export.sh)
 AR="${LLVM_AR:-llvm-ar}"
 TARGET="${TARGET:-riscv32-esp-elf}"
-MARCH="${MARCH:-rv32imafc_zicsr_zifencei}"
+# esp-clang (LLVM 16) n'accepte pas les extensions _zicsr_zifencei dans -march
+# (contrairement au GCC d'IDF). Pour l'ESP32-P4, rv32imafc suffit.
+MARCH="${MARCH:-rv32imafc}"
 MABI="${MABI:-ilp32f}"
 
 # Sysroot : headers newlib/pthread d'ESP-IDF. Auto-détection depuis la toolchain
