@@ -29,8 +29,11 @@ idf_component_register(
 
 if(_edge264_enabled)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC USE_H264_HP_EDGE264=1)
-    # Lib statique edge264 précompilée Clang (RISC-V). pthread fourni par ESP-IDF.
-    target_link_libraries(${COMPONENT_LIB} PUBLIC "${_edge264_lib}")
+    # add_prebuilt_library inscrit libedge264.a dans le groupe de link d'ESP-IDF,
+    # ce qui résout les dépendances croisées avec newlib (ex. sysconf) quel que
+    # soit l'ordre. edge264 utilise pthread.
+    add_prebuilt_library(edge264 "${_edge264_lib}" PRIV_REQUIRES pthread)
+    target_link_libraries(${COMPONENT_LIB} PUBLIC edge264)
     message(STATUS "[h264_hp] edge264 ACTIVÉ — link de libedge264.a (High Profile).")
 else()
     message(STATUS "[h264_hp] edge264 inactif (no-op). Génère edge264/lib/esp32p4/"
