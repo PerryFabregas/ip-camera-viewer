@@ -69,7 +69,21 @@ jobs:
           git add -f components/h264_hp/edge264/lib/esp32p4/libedge264.a
           if git diff --cached --quiet; then
             echo "libedge264.a inchangé, rien à commiter."
-          else
-            git commit -m "ci: rebuild libedge264.a (esp32p4, esp-clang) [skip ci]"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            exit 0
           fi
+          git commit -m "ci: rebuild libedge264.a (esp32p4, esp-clang) [skip ci]"
+          # La branche peut avoir avancé pendant le build : rebase notre commit
+          # (qui n'ajoute que le binaire) sur le sommet distant, puis push. Retry
+          # en cas de push concurrent.
+          for i in 1 2 3 4 5; do
+            git fetch origin "${GITHUB_REF_NAME}" || true
+            if git rebase "origin/${GITHUB_REF_NAME}" \
+               && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "libedge264.a poussé."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "push concurrent, retry $i..."; sleep 3
+          done
+          echo "::error::Impossible de pousser libedge264.a après plusieurs tentatives."
+          exit 1
