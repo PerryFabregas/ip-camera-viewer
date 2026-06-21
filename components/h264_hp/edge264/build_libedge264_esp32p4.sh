@@ -53,11 +53,15 @@ echo "[edge264] target  = $TARGET  march=$MARCH  mabi=$MABI"
 echo "[edge264] sysroot = ${SYSROOT:-<aucun: ajoute -isystem si la compil échoue>}"
 
 # edge264 est un unity build : on ne compile QUE src/edge264.c (il #include le reste).
+# -DCLOCK_PROCESS_CPUTIME_ID=CLOCK_MONOTONIC : le newlib ESP-IDF ne définit pas
+#   CLOCK_PROCESS_CPUTIME_ID (gardé derrière _POSIX_CPUTIME). Il n'est utilisé que
+#   par un helper de chronométrage (profiling/log), pas par le décodage -> on le
+#   remappe sur CLOCK_MONOTONIC (présent) pour que ça compile.
 "$CLANG" \
   --target="$TARGET" -march="$MARCH" -mabi="$MABI" \
   $SYSROOT_FLAG \
-  -std=gnu11 -O3 -ffunction-sections -fdata-sections \
-  -fno-exceptions -fno-rtti -DNDEBUG \
+  -std=gnu11 -O3 -ffunction-sections -fdata-sections -DNDEBUG \
+  -DCLOCK_PROCESS_CPUTIME_ID=CLOCK_MONOTONIC \
   -I. -Isrc \
   -c src/edge264.c -o "$OUT_DIR/edge264.o"
 
