@@ -32,6 +32,9 @@ async def to_code(config):
     has_header = os.path.exists(os.path.join(component_dir, "edge264", "edge264.h"))
 
     if os.path.exists(lib):
+        # Flag GLOBAL : permet à ip_camera_viewer de router vers edge264 (le link
+        # effectif du .a est géré par CMakeLists.txt de ce composant).
+        cg.add_build_flag("-DUSE_H264_HP_EDGE264")
         print("[h264_hp] libedge264.a présent — décodeur High Profile ACTIVÉ (link).")
     elif has_header:
         print(

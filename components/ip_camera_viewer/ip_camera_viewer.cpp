@@ -1294,11 +1294,17 @@ bool IPCameraViewer::connect_rtsp_stream_() {
                             : profile_idc == 244 ? "High444" : "Unknown";
         ESP_LOGI(TAG, "H264 stream profile_idc=%u (%s), level_idc=%u", profile_idc, pname, level_idc);
         if (profile_idc != 66) {
+#ifdef USE_H264_HP_EDGE264
+          // edge264 gère Baseline/Main/High : on route ce flux vers lui.
+          this->use_hp_decoder_ = true;
+          ESP_LOGI(TAG, "H264 %s profile -> décodage via edge264 (h264_hp, High Profile).", pname);
+#else
           ESP_LOGE(TAG, "This stream is H264 %s profile, but the ESP32-P4 software decoder "
                         "(tinyH264) only supports BASELINE. It will NOT decode (VLC works because "
                         "it has a full decoder).", pname);
-          ESP_LOGE(TAG, "Fix: use MJPEG via go2rtc (hardware JPEG decode, recommended), or have "
-                        "go2rtc/ffmpeg transcode the stream to H264 Baseline.");
+          ESP_LOGE(TAG, "Fix: build libedge264.a (h264_hp) for native High decode, use MJPEG via "
+                        "go2rtc, or transcode the stream to H264 Baseline.");
+#endif
         }
       }
     }
@@ -1911,6 +1917,56 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
   if (this->h264_data_len_ == 0 || this->h264_decoder_ == nullptr) {
     return false;
   }
+
+#ifdef USE_H264_HP_EDGE264
+  if (this->use_hp_decoder_) {
+    if (!this->hp_started_) {
+      this->hp_started_ = this->hp_decoder_.begin(2);  // P4 dual-core, PSRAM via wrapper
+      if (!this->hp_started_) {
+        ESP_LOGE(TAG, "edge264: échec d'initialisation du décodeur High Profile");
+        this->h264_data_len_ = 0;
+        return false;
+      }
+    }
+
+    // Fournir le flux Annex-B accumulé (SPS/PPS + slices) à edge264.
+    this->hp_decoder_.decode_annexb(this->h264_buffer_, this->h264_data_len_);
+    this->h264_data_len_ = 0;
+
+    bool got = false;
+    h264_hp::DecodedFrame f;
+    while (this->hp_decoder_.get_frame(&f)) {
+      const int w = f.width & ~1;   // dimensions paires (4:2:0)
+      const int h = f.height & ~1;
+      const int cw = w / 2, ch = h / 2;
+      const size_t need = (size_t) w * h + 2u * (size_t) cw * ch;
+      if (w > 0 && h > 0 && f.y && f.cb && f.cr && need <= this->yuv_buffer_size_) {
+        // Empaqueter en I420 contigu (Y|U|V), en retirant le padding de stride,
+        // car convert_yuv420_to_rgb565_ attend ce layout à width_/height_.
+        if ((w != this->width_ || h != this->height_)) {
+          static bool warned = false;
+          if (!warned) {
+            ESP_LOGW(TAG, "edge264: flux %dx%d != config %ux%u (ajuste width/height)",
+                     w, h, this->width_, this->height_);
+            warned = true;
+          }
+        }
+        uint8_t *dst = this->yuv_buffer_;
+        for (int row = 0; row < h; row++)
+          memcpy(dst + (size_t) row * w, f.y + (size_t) row * f.stride_y, w);
+        dst += (size_t) w * h;
+        for (int row = 0; row < ch; row++)
+          memcpy(dst + (size_t) row * cw, f.cb + (size_t) row * f.stride_c, cw);
+        dst += (size_t) cw * ch;
+        for (int row = 0; row < ch; row++)
+          memcpy(dst + (size_t) row * cw, f.cr + (size_t) row * f.stride_c, cw);
+        got = true;
+      }
+      this->hp_decoder_.release_frame();
+    }
+    return got;
+  }
+#endif
 
   esp_h264_dec_in_frame_t in_frame = {};
   in_frame.raw_data.buffer = this->h264_buffer_;

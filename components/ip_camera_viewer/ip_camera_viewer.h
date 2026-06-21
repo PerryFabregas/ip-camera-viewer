@@ -12,6 +12,12 @@ extern "C" {
 #include "esp_h264_dec_sw.h"
 }
 
+// H264 High Profile decoder (edge264) — actif seulement si libedge264.a est
+// présent (flag défini par le composant h264_hp).
+#ifdef USE_H264_HP_EDGE264
+#include "esphome/components/h264_hp/h264_hp_decoder.h"
+#endif
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -131,6 +137,13 @@ class IPCameraViewer : public Component {
 
   // H264 decoder
   esp_h264_dec_handle_t h264_decoder_{nullptr};
+
+#ifdef USE_H264_HP_EDGE264
+  // Décodeur High Profile (edge264) : utilisé quand le flux n'est pas Baseline.
+  h264_hp::H264HpDecoder hp_decoder_;
+  bool use_hp_decoder_{false};
+  bool hp_started_{false};
+#endif
 
   // H264 receive buffer
   uint8_t *h264_buffer_{nullptr};

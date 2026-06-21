@@ -4,6 +4,9 @@ from esphome.const import CONF_ID, CONF_URL
 import os
 
 DEPENDENCIES = ["wifi"]
+# h264_hp fournit le décodeur H.264 High Profile (edge264). Auto-chargé pour que
+# son libedge264.a soit linké et le flag USE_H264_HP_EDGE264 défini si dispo.
+AUTO_LOAD = ["h264_hp"]
 CODEOWNERS = ["@youkorr"]
 
 CONF_CANVAS_ID = "canvas_id"
