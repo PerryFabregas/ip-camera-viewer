@@ -42,9 +42,10 @@ if os.path.exists(esp_h264_dir):
         "port/src/esp_h264_cache.c",
         "sw/src/esp_h264_dec_sw.c",
         "sw/src/h264_color_convert.c",
-        "interface/include/src/esp_h264_dec.c",
-        "interface/include/src/esp_h264_dec_param.c",
-        "interface/include/src/esp_h264_version.c",
+        # esp_h264 1.3.6 moved interface sources: interface/include/src -> interface/src
+        "interface/src/esp_h264_dec.c",
+        "interface/src/esp_h264_dec_param.c",
+        "interface/src/esp_h264_version.c",
     ]
 
     h264_objects = []

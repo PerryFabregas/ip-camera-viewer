@@ -1,5 +1,0 @@
-version: "1.0.0"
-description: ESP H.264 Encoder
-url: https://github.com/espressif/esp-video
-dependencies:
-  idf: ">=5.0"
