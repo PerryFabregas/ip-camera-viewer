@@ -1,76 +1,96 @@
 # h264_hp — Décodeur H.264 **High Profile** léger pour ESP32-P4
 
-Composant interne fournissant un décodeur H.264 **Baseline / Main / High**
-(« comme VLC », en logiciel) pour l'ESP32-P4, là où le décodeur Espressif
-(`esp_h264_dec_sw` → tinyH264/h264bsd) ne gère que le **Constrained Baseline**.
+Décodeur H.264 **Baseline / Main / High** (« comme VLC », en logiciel) pour
+ESP32-P4, là où le décodeur Espressif (`esp_h264_dec_sw` → tinyH264/h264bsd) ne
+gère que le **Constrained Baseline**.
 
-Il s'appuie sur **[edge264](https://github.com/tvlabs/edge264)** (décodeur H.264
-open-source, **licence BSD**, axé légèreté/vitesse), encapsulé dans une API C++
-simple et orienté ESPHome.
-
----
-
-## Pourquoi ce composant existe
-
-| Décodeur | Profils | Sur P4 |
-| -------- | ------- | ------ |
-| Bloc matériel ESP32-P4 | — | ❌ **pas de décodeur HW** (encodeur seul) |
-| tinyH264 / h264bsd (`esp_h264_dec_sw`, actuel) | **Baseline only** | ✅ mais échoue sur Main/High |
-| **edge264 (ce composant)** | **Baseline / Main / High** (CABAC, 8×8, B-slices) | ✅ logiciel, scalaire |
-
-C'est la raison du symptôme classique : **VLC lit le flux, l'ESP32-P4 non** —
-parce que la caméra émet du Main/High et que seul le Baseline était décodé.
+S'appuie sur **[edge264](https://github.com/tvlabs/edge264)** (décodeur H.264
+open-source, **licence BSD**, axé légèreté/vitesse), **vendorisé** ici sous
+`edge264/` (552 Ko de source), encapsulé dans une API C++ orientée ESPHome.
 
 ---
 
-## ⚠️ Réalité de performance (à lire avant d'espérer du 1080p)
+## ✅ État
 
-edge264 tire sa vitesse du **SIMD** (SSE/AVX sur x86, NEON sur ARM). L'**ESP32-P4
-est RISC-V sans SIMD** → edge264 tourne en **code scalaire**. Conséquences :
-
-- Performances **bien inférieures** au benchmark desktop d'edge264.
-- Estimation **non garantie, à mesurer sur hardware** : exploitable en
-  **basse/moyenne résolution** (VGA ~10-20 fps), **pas en 1080p30**.
-- CABAC (Main/High) est séquentiel et coûteux : c'est le facteur limitant.
-- Limites edge264 actuelles : **8 bits, 4:2:0** uniquement ; pré-production
-  (gel d'API visé 2027). Suffisant pour des flux IP-cam standards.
-
-Si la perf est insuffisante, l'alternative pragmatique reste de **transcoder en
-amont** (go2rtc/ffmpeg → Baseline), que le chemin tinyH264 existant décode déjà.
+- **Source edge264 vendorisée** (`edge264/edge264.h` + `edge264/src/`).
+- **Wrapper C++** `H264HpDecoder` prêt (PSRAM, threads, sortie I420).
+- **Compilation edge264 désactivée par défaut** → ton build GCC reste vert.
+- Reste à faire : **passer en toolchain Clang** puis activer (voir plus bas).
 
 ---
 
-## Installation d'edge264 (sous-module)
+## 🚧 LE point bloquant : toolchain Clang obligatoire
 
-Les sources edge264 ne sont **pas** incluses ici (licence BSD à conserver telle
-quelle). Ajoutez-les sous `edge264/` :
+Vérifié dans la source edge264 (`src/edge264_internal.h`, lignes 30-42) :
 
-```sh
-cd ip-camera-viewer
-git submodule add https://github.com/tvlabs/edge264 components/h264_hp/edge264
-git submodule update --init --recursive
+```c
+#ifndef SIMD
+    #if defined(__SSE2__)        // x86
+    #elif defined(__ARM_NEON)    // ARM
+    #elif defined(__clang__)     // backend générique (vector extensions Clang)
+    #else
+        #error "No supported vector intrinsics found (SSE, NEON, WASM, clang)"
+    #endif
+#endif
 ```
 
-Dès que `components/h264_hp/edge264/edge264.h` est présent :
-- `__init__.py` définit automatiquement `-DUSE_H264_HP_EDGE264`,
-- `CMakeLists.txt` compile les `edge264/*.c`,
-- le wrapper bascule du mode no-op au vrai décodeur.
+- **ESP32-P4 = RISC-V** : ni SSE, ni NEON, ni WASM.
+- En **GCC** (toolchain ESPHome/PlatformIO par défaut) → `#error`, **ne compile pas**.
+- Le backend générique repose sur `__builtin_shufflevector` / `__builtin_convertvector`,
+  **builtins propres à Clang** (le code note lui-même : *« no way to make clang use
+  __builtin_shufflevector, and GCC performs worse »*). Les réécrire pour GCC =
+  réécrire tout le cœur vectoriel → non réaliste.
 
-### Portage RISC-V (le vrai travail restant)
+➡️ **edge264 sur P4 n'est exploitable qu'avec la toolchain Clang d'ESP-IDF.**
 
-edge264 ne cible pas nativement l'ESP32-P4. Étapes de portage :
+### Activation (après passage à Clang)
 
-1. **Toolchain** : edge264 s'appuie sur les *vector extensions* du compilateur.
-   - Chemin recommandé : **toolchain Clang d'ESP-IDF** (`idf.py` avec Clang),
-     car le backend générique « Other ISAs » d'edge264 exige **Clang ≥ 15**.
-   - Avec GCC RISC-V : prévoir un fallback scalaire des intrinsics vectorielles.
-2. **Mémoire** : toutes les allocations passent par les callbacks
-   `psram_alloc_cb` / `psram_free_cb` du wrapper → **PSRAM** (`MALLOC_CAP_SPIRAM`).
-   Vérifier la taille du DPB (frames de référence) selon la résolution.
-3. **Threads** : `begin(n_threads=2)` exploite les 2 cœurs du P4.
-4. **Mapping des dimensions** : finaliser `get_frame()` (width/height/stride à
-   partir de `Edge264Frame.frame_crop_offsets` et du stride interne edge264 —
-   à fixer sur la version exacte vendorisée).
+```sh
+# 1) Build ESP-IDF avec Clang (toolchain expérimentale espressif/llvm)
+idf.py --preview set-target esp32p4
+# configurer la toolchain Clang (esp-clang) dans l'environnement IDF
+
+# 2) Activer la compilation edge264 dans ce composant
+touch components/h264_hp/edge264/ENABLE_EDGE264
+```
+
+Le marqueur `ENABLE_EDGE264` déclenche, côté CMake :
+- compilation du **seul** `edge264/src/edge264.c` (unity build : il #include les autres),
+- `-DUSE_H264_HP_EDGE264` → le wrapper bascule du no-op au vrai décodeur.
+
+Tant que le marqueur est absent : wrapper **no-op**, build inchangé.
+
+---
+
+## ⚠️ Performance (à mesurer sur hardware)
+
+Même sous Clang, le P4 n'a **pas de SIMD** : edge264 tourne en **scalaire**.
+Estimation **non garantie** : exploitable en **basse/moyenne résolution**
+(VGA ~10-20 fps), **pas en 1080p30**. CABAC (Main/High) est le facteur limitant.
+Limites edge264 : **8 bits, 4:2:0** uniquement ; pré-production (gel d'API 2027).
+
+---
+
+## 🅱️ Alternative si tu restes en GCC : openh264 (décodeur depuis la source)
+
+Si passer à Clang n'est pas envisageable, le chemin High-profile compatible
+**GCC** est **openh264** compilé **depuis la source** (C++ portable, fallbacks
+scalaires, BSD) :
+
+- Plus **lourd et plus lent** qu'edge264, mais **compile en GCC** et **sans
+  risque d'ABI** (contrairement au `libopenh264.a` encodeur-seul fourni, qui
+  ne décode pas).
+- Il faut vendoriser l'arbre `codec/decoder/` d'openh264 (non inclus ici) et le
+  compiler ; l'API décodeur (`WelsCreateDecoder` / `ISVCDecoder`) est déjà
+  déclarée dans `../esp_h264/sw/libs/openh264_inc/codec_api.h`.
+
+| Critère | edge264 | openh264 (décodeur source) |
+| ------- | ------- | -------------------------- |
+| Légèreté | ✅ 552 Ko | ❌ lourd |
+| Vitesse | ✅ (relative) | ❌ plus lent |
+| Toolchain P4 | **Clang only** | ✅ **GCC ok** |
+| Profils | Baseline/Main/High | Baseline/Main/High |
+| Licence | BSD | BSD |
 
 ---
 
@@ -83,39 +103,29 @@ using esphome::h264_hp::DecodedFrame;
 
 H264HpDecoder dec;
 dec.begin(/*n_threads=*/2);          // alloue le décodeur en PSRAM
-
-// Flux Annex-B (start-codes 00 00 00 01) : SPS, PPS, slices...
-dec.decode_annexb(buf, len);         // ou decode_nal(nal_body, nal_len)
+dec.decode_annexb(buf, len);         // flux Annex-B (start-codes), ou decode_nal()
 
 DecodedFrame f;
 while (dec.get_frame(&f)) {           // I420 : f.y / f.cb / f.cr
   // ... afficher / convertir ...
-  dec.release_frame();                // rendre les buffers empruntés
+  dec.release_frame();
 }
 ```
 
-Sortie = **3 plans Y/Cb/Cr 4:2:0** (I420), exactement le format déjà attendu par
-`ip_camera_viewer` (configuré `ESP_H264_RAW_FMT_I420`).
+Sortie = **3 plans Y/Cb/Cr 4:2:0** (I420), déjà attendu par `ip_camera_viewer`.
 
 ---
 
-## Intégration dans `ip_camera_viewer`
+## Intégration prévue dans `ip_camera_viewer`
 
-Remplacer le chemin tinyH264 (`init_h264_decoder_` / `decode_h264_to_yuv_`) par
-ce décodeur quand le flux n'est pas Baseline. Le `profile_idc` lu dans le SPS
-(déjà extrait par `ip_camera_viewer.cpp`) peut servir d'aiguillage :
-Baseline → tinyH264 (léger) ; Main/High → h264_hp (edge264).
-
-> ⚠️ Le code actuel de `ip_camera_viewer` logue à tort « openh264 supports
-> Baseline/Main/High » : le `libopenh264.a` fourni est **encodeur seul** et le
-> décodage passe en réalité par tinyH264 (Baseline). Ce composant corrige ce
-> manque côté décodage.
+Aiguillage selon le `profile_idc` lu dans le SPS (déjà extrait par
+`ip_camera_viewer.cpp`) : Baseline → tinyH264 (léger) ; Main/High → h264_hp.
+À brancher une fois la toolchain choisie.
 
 ---
 
 ## Licences
 
-- **edge264** : BSD (Thibault Raffaillac / TVLabs). Conserver l'en-tête.
-- Rappel **brevets** H.264 : la *norme* reste couverte par un pool de brevets
-  (Via LA), indépendamment de la licence du code (de moins en moins de brevets
-  actifs, beaucoup expirant ~2023-2026). À évaluer selon usage commercial.
+- **edge264** : BSD (Thibault Raffaillac / TVLabs) — voir `edge264/LICENSE_BSD.txt`.
+- Rappel **brevets** : la *norme* H.264 reste couverte par un pool de brevets
+  (Via LA), indépendamment de la licence du code (beaucoup expirant ~2023-2026).

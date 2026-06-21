@@ -1,16 +1,16 @@
 """
-h264_hp — Décodeur H.264 High Profile léger pour ESP32-P4 (basé sur edge264).
+h264_hp — Décodeur H.264 High Profile léger pour ESP32-P4 (basé sur edge264, BSD).
 
-Composant INTERNE (bibliothèque) : il n'a pas de configuration YAML propre.
-Il est destiné à être utilisé par ip_camera_viewer comme remplaçant du chemin
-tinyH264 (Baseline only) afin de décoder les flux Main/High profile.
+Composant INTERNE (bibliothèque) : pas de configuration YAML propre. Destiné à
+remplacer le chemin tinyH264 (Baseline only) de ip_camera_viewer pour décoder
+les flux Main/High profile.
 
-Intégration edge264 :
-  Les sources d'edge264 (licence BSD) doivent être présentes dans
-  components/h264_hp/edge264/ (sous-module git — voir README.md).
-  Quand elles sont là, ce composant les compile et définit USE_H264_HP_EDGE264.
-  Sinon, le wrapper compile en mode no-op (begin() renvoie false) pour ne pas
-  casser le build.
+La compilation des sources edge264 est pilotée par CMakeLists.txt (ESP-IDF) :
+elle n'est ACTIVE que si le marqueur edge264/ENABLE_EDGE264 existe — voir README.
+
+⚠️ edge264 sur ESP32-P4 (RISC-V) ne compile qu'avec la toolchain Clang d'ESP-IDF.
+En GCC (PlatformIO par défaut), NE PAS créer le marqueur : le wrapper reste en
+mode no-op et le build reste vert.
 """
 
 import os
@@ -21,32 +21,26 @@ import esphome.config_validation as cv
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32"]
 
-# Pas d'utilisation directe dans le YAML.
 CONFIG_SCHEMA = cv.invalid(
-    "h264_hp est un composant interne (bibliothèque de décodage). "
-    "Ne le déclarez pas dans le YAML ; il est tiré par ip_camera_viewer."
+    "h264_hp est un composant interne (bibliothèque de décodage H.264 High "
+    "Profile). Ne le déclarez pas dans le YAML ; il est tiré par ip_camera_viewer."
 )
 
 
 async def to_code(config):
     component_dir = os.path.dirname(os.path.abspath(__file__))
     edge264_dir = os.path.join(component_dir, "edge264")
+    marker = os.path.join(edge264_dir, "ENABLE_EDGE264")
 
-    # Include du wrapper
-    cg.add_build_flag(f"-I{component_dir}")
+    has_src = os.path.exists(os.path.join(edge264_dir, "src", "edge264.c"))
+    enabled = has_src and os.path.exists(marker)
 
-    if os.path.isdir(edge264_dir) and os.path.exists(os.path.join(edge264_dir, "edge264.h")):
-        # edge264 vendorisé : on active le vrai décodeur.
-        cg.add_build_flag(f"-I{edge264_dir}")
-        cg.add_build_flag("-DUSE_H264_HP_EDGE264")
-
-        # edge264 s'appuie sur les "vector extensions" du compilateur. Sur P4
-        # (RISC-V, pas de SIMD), Clang >= 15 mappe en scalaire. La compilation
-        # des .c edge264 est faite par le script PlatformIO h264_hp_build.py
-        # (comme esp_h264) pour maîtriser les flags par fichier.
-        print("[h264_hp] edge264 détecté : décodeur High Profile activé")
-    else:
+    if enabled:
+        print("[h264_hp] edge264 ACTIVÉ (High Profile) — toolchain Clang requise.")
+    elif has_src:
         print(
-            "[h264_hp] edge264 absent (components/h264_hp/edge264/). "
-            "Décodeur High Profile DÉSACTIVÉ — voir README.md pour le sous-module."
+            "[h264_hp] edge264 vendorisé mais INACTIF (no-op). Pour l'activer : "
+            "passer en toolchain Clang puis créer components/h264_hp/edge264/ENABLE_EDGE264."
         )
+    else:
+        print("[h264_hp] sources edge264 absentes — décodeur High Profile indisponible.")
