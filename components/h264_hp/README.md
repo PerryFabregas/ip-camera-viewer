@@ -31,28 +31,25 @@ aucune réécriture · ton ami n'a qu'à **compiler le `.a` une fois**.
 
 ---
 
-## 🔧 Mode d'emploi (à faire une fois, sur la machine de build)
+## 🔧 Qui construit le `.a` ? → le **CI**, pas l'utilisateur
 
-```sh
-# 1) ESP-IDF + toolchain Clang
-idf_tools.py install esp-clang
-. $IDF_PATH/export.sh
+⚠️ Un utilisateur **ESPHome n'a ni ESP-IDF ni esp-clang** : il **ne lance rien**.
+Le `.a` est construit **une fois par GitHub Actions** puis **commité** dans le
+dépôt — comme `libtinyh264.a`. Ensuite tout le monde compile normalement (GCC).
 
-# 2) Construire la lib (ajuste -march/-mabi si ton build P4 diffère)
-cd components/h264_hp/edge264
-./build_libedge264_esp32p4.sh
-# -> produit edge264/lib/esp32p4/libedge264.a
-```
+- Workflow : `.github/workflows/build-edge264.yml`
+  (installe esp-clang, lance le build, commite `edge264/lib/esp32p4/libedge264.a`).
+- Déclenche-le via **Actions → « Build libedge264.a » → Run workflow**.
 
-Dès que `edge264/lib/esp32p4/libedge264.a` existe :
+Dès que `edge264/lib/esp32p4/libedge264.a` est présent dans le dépôt :
 - `CMakeLists.txt` le **linke** et définit `-DUSE_H264_HP_EDGE264`,
-- le wrapper bascule du no-op au vrai décodeur.
+- le wrapper passe du no-op au vrai décodeur,
+- **l'utilisateur ESPHome ne fait que `esphome compile`** — aucun Clang requis.
 
 Sans le `.a` : wrapper **no-op**, build ESPHome inchangé (jamais cassé).
 
-> Le `.a` ne doit PAS forcément être commité : ton ami peut le régénérer. Si tu
-> veux le distribuer aux utilisateurs (pour qu'ils n'aient pas besoin de Clang),
-> commite `edge264/lib/esp32p4/libedge264.a` dans le dépôt.
+> Le script `build_libedge264_esp32p4.sh` n'est là que pour le CI (ou un dev qui a
+> déjà ESP-IDF+Clang). Personne d'autre n'a besoin de le lancer.
 
 ---
 
@@ -93,7 +90,7 @@ Sortie = **3 plans Y/Cb/Cr 4:2:0** (I420), déjà attendu par `ip_camera_viewer`
 - [x] Source edge264 vendorisée
 - [x] Wrapper C++ (PSRAM, threads, I420)
 - [x] Stratégie Clang-lib + linkage GCC + script de build
-- [ ] **Générer `libedge264.a`** avec esp-clang (machine de build de ton ami)
+- [ ] **Générer `libedge264.a`** via GitHub Actions (workflow build-edge264.yml)
 - [ ] Finaliser le mapping `get_frame()` (width/height/stride depuis `Edge264Frame`)
 - [ ] Brancher l'aiguillage dans `ip_camera_viewer` (Baseline→tinyH264 / Main-High→h264_hp)
 - [ ] **Mesurer la perf** sur ESP32-P4 réel

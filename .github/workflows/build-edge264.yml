@@ -1,0 +1,73 @@
+name: Build libedge264.a (ESP32-P4, esp-clang)
+
+# Construit edge264 avec la toolchain Clang d'ESP-IDF en une lib statique RISC-V,
+# puis commite edge264/lib/esp32p4/libedge264.a dans le dépôt.
+#
+# => Les utilisateurs ESPHome n'ont RIEN à faire : ils récupèrent le .a déjà
+#    présent et compilent normalement (GCC/PlatformIO). Seul ce CI a besoin de Clang.
+#
+# Déclenchement : manuel (Actions -> Run workflow), ou quand la source edge264 change.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "components/h264_hp/edge264/src/**"
+      - "components/h264_hp/edge264/edge264.h"
+      - "components/h264_hp/edge264/build_libedge264_esp32p4.sh"
+      - ".github/workflows/build-edge264.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build-lib:
+    runs-on: ubuntu-latest
+    # Image officielle ESP-IDF : fournit riscv32-esp-elf-gcc (sysroot) + idf_tools.
+    container:
+      image: espressif/idf:release-v5.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install esp-clang toolchain
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          python "$IDF_PATH/tools/idf_tools.py" install esp-clang
+          python "$IDF_PATH/tools/idf_tools.py" export || true
+
+      - name: Build libedge264.a
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          # esp-clang n'est pas dans le PATH par défaut : on le localise.
+          CLANG_BIN="$(python "$IDF_PATH/tools/idf_tools.py" export --format key-value 2>/dev/null \
+                      | sed -n 's/^PATH=//p' | tr ':' '\n' | grep -i 'esp-clang' | head -1)"
+          if [ -n "$CLANG_BIN" ]; then export PATH="$CLANG_BIN:$PATH"; fi
+          echo "clang: $(command -v clang || echo 'NON TROUVÉ')"
+          export CLANG=clang LLVM_AR=llvm-ar
+          cd components/h264_hp/edge264
+          ./build_libedge264_esp32p4.sh
+          echo "=== symboles ==="
+          llvm-nm lib/esp32p4/libedge264.a | grep -E 'edge264_(alloc|decode_NAL|get_frame)' || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libedge264-esp32p4
+          path: components/h264_hp/edge264/lib/esp32p4/libedge264.a
+
+      - name: Commit the prebuilt lib
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f components/h264_hp/edge264/lib/esp32p4/libedge264.a
+          if git diff --cached --quiet; then
+            echo "libedge264.a inchangé, rien à commiter."
+          else
+            git commit -m "ci: rebuild libedge264.a (esp32p4, esp-clang) [skip ci]"
+            git push
+          fi
