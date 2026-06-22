@@ -3,6 +3,10 @@ name: ESPHome compile (esp32-p4)
 # Runs a full `esphome compile` for the ip_camera_viewer component on ESP32-P4.
 # This catches packaging errors (include paths, prebuilt-lib linking) in CI,
 # instead of on a tester's hardware. Runtime/video is NOT validated here.
+#
+# Two configs are built in parallel:
+#   - ipcv_p4_test.yaml ........... LVGL bundled with ESPHome (9.5.0)
+#   - ipcv_p4_lvglfork_test.yaml .. LVGL from youkorr/lvgl_9.5@main (the fork)
 
 on:
   push:
@@ -17,6 +21,13 @@ jobs:
   compile:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - tests/esphome/ipcv_p4_test.yaml
+          - tests/esphome/ipcv_p4_lvglfork_test.yaml
+    name: compile (${{ matrix.config }})
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,7 +44,7 @@ jobs:
             ~/.platformio
             ~/.espressif
             ~/.cache/pip
-          key: esphome-p4-${{ hashFiles('tests/esphome/ipcv_p4_test.yaml') }}
+          key: esphome-p4-${{ hashFiles(matrix.config) }}
           restore-keys: |
             esphome-p4-
 
@@ -44,7 +55,7 @@ jobs:
           esphome version
 
       - name: Validate config
-        run: esphome config tests/esphome/ipcv_p4_test.yaml
+        run: esphome config ${{ matrix.config }}
 
       - name: Compile firmware
-        run: esphome compile tests/esphome/ipcv_p4_test.yaml
+        run: esphome compile ${{ matrix.config }}

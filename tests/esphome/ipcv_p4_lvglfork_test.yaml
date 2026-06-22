@@ -1,0 +1,92 @@
+# =============================================================================
+# CI compile test for ip_camera_viewer on ESP32-P4 — using youkorr/lvgl_9.5.
+#
+# Identical to ipcv_p4_test.yaml EXCEPT that the LVGL component (and its forked
+# siblings) come from youkorr/lvgl_9.5@main instead of the LVGL bundled with
+# ESPHome. This verifies that ip_camera_viewer compiles against *that* LVGL fork
+# (LVGL 9.5.0 + ThorVG + ESP32-P4 PPA + custom lv_conf.h / build filter).
+#
+# Runtime/video is NOT validated here — only that the firmware builds.
+# =============================================================================
+
+esphome:
+  name: ipcv-p4-lvglfork
+
+esp32:
+  board: esp32-p4-evboard
+  variant: esp32p4
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+logger:
+
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  slot: 1
+
+wifi:
+  ap:
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+display:
+  - platform: mipi_dsi
+    id: tab5_display
+    model: JC1060P470
+    enable_pin: GPIO22
+
+lvgl:
+  displays:
+    - tab5_display
+  pages:
+    - id: main_page
+      widgets:
+        - canvas:
+            id: cam_canvas
+            width: 640
+            height: 480
+
+external_components:
+  # LVGL (et composants forkés) depuis le dépôt de youkorr — remplace le LVGL
+  # livré par ESPHome. C'est exactement ce que teste cette config.
+  - source:
+      type: git
+      url: https://github.com/youkorr/lvgl_9.5
+      ref: main
+    components: [lvgl, button, font, image, thorvg, lottie_state_machine]
+    refresh: always
+  - source:
+      type: local
+      path: ../../components
+    components: [ip_camera_viewer, h264_hp, esp_h264]
+
+ip_camera_viewer:
+  - id: cam_test
+    protocol: rtsp
+    url: "rtsp://user:pass@192.168.1.50:554/h264Preview_01_sub"
+    canvas_id: cam_canvas
+    width: 640
+    height: 480
+    update_interval: 100ms
+
+switch:
+  - platform: ip_camera_viewer
+    name: "Cam test"
+    camera_id: cam_test
