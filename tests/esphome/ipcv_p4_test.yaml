@@ -57,7 +57,7 @@ display:
 
 lvgl:
   displays:
-    - display_id: tab5_display
+    - tab5_display
   pages:
     - id: main_page
       widgets:
