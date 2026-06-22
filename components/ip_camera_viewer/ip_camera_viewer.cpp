@@ -457,9 +457,11 @@ bool IPCameraViewer::init_jpeg_decoder_() {
 }
 
 bool IPCameraViewer::init_h264_decoder_() {
+  // esp_h264_dec_cfg_t (1.3.6) exposes only pic_type. There is no profile field:
+  // esp_h264_dec_sw routes to tinyH264/h264bsd, which is Constrained Baseline only.
+  // Main/High profile is handled separately by the edge264 (h264_hp) path.
   esp_h264_dec_cfg_sw_t dec_cfg = {};
   dec_cfg.pic_type = ESP_H264_RAW_FMT_I420;
-  dec_cfg.profile_idc = ESP_H264_PROFILE_AUTO;  // NB: esp_h264_dec_sw routes to tinyH264/h264bsd (Baseline only)
 
   esp_h264_err_t ret = esp_h264_dec_sw_new(&dec_cfg, &this->h264_decoder_);
   if (ret != ESP_H264_ERR_OK) {
