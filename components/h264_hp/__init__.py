@@ -20,10 +20,7 @@ import esphome.config_validation as cv
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32"]
 
-CONFIG_SCHEMA = cv.invalid(
-    "h264_hp est un composant interne (décodeur H.264 High Profile via edge264). "
-    "Ne le déclarez pas dans le YAML ; il est tiré par ip_camera_viewer."
-)
+CONFIG_SCHEMA = cv.Schema({})  # composant interne tiré par ip_camera_viewer (AUTO_LOAD)
 
 
 async def to_code(config):
