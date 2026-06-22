@@ -52,6 +52,20 @@ display:
     model: JC1060P470
     enable_pin: GPIO22
 
+# Le fork définit USE_IMAGE / USE_FONT (lvgl_esphome.h inclut image.h / font.h).
+# Lister image/font dans external_components ne suffit pas : un composant n'est
+# COPIÉ (header présent) que s'il est réellement utilisé. On ajoute donc des
+# blocs font:/image: minimalistes — comme dans une vraie config youkorr.
+font:
+  - file: "gfonts://Roboto"
+    id: roboto
+    size: 14
+
+image:
+  - file: test_image.png
+    id: test_img
+    type: RGB565
+
 lvgl:
   displays:
     - tab5_display
