@@ -29,9 +29,13 @@ async def to_code(config):
     has_header = os.path.exists(os.path.join(component_dir, "edge264", "edge264.h"))
 
     if os.path.exists(lib):
-        # Flag GLOBAL : permet à ip_camera_viewer de router vers edge264 (le link
-        # effectif du .a est géré par CMakeLists.txt de ce composant).
+        # ESPHome ignore le CMakeLists.txt des composants externes : on gère donc
+        # tout via cg/PlatformIO.
+        #  - -DUSE_H264_HP_EDGE264 : active le code edge264 dans le wrapper.
+        #  - -I.../edge264 : pour que h264_hp_decoder.cpp trouve <edge264.h>.
+        # Le LINK de libedge264.a est fait par ip_camera_viewer_build.py.
         cg.add_build_flag("-DUSE_H264_HP_EDGE264")
+        cg.add_build_flag("-I" + os.path.join(component_dir, "edge264"))
         print("[h264_hp] libedge264.a présent — décodeur High Profile ACTIVÉ (link).")
     elif has_header:
         print(

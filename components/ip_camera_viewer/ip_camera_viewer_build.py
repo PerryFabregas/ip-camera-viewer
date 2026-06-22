@@ -94,4 +94,18 @@ if os.path.exists(esp_h264_dir):
 else:
     print(f"[IP Camera Viewer]  esp_h264 component not found")
 
+# ========================================================================
+# edge264 (High Profile) — composant h264_hp auto-chargé, lib précompilée Clang
+# ESPHome n'utilise pas le CMakeLists.txt du composant : on linke la lib ici.
+# ========================================================================
+h264_hp_dir = os.path.join(parent_components_dir, "h264_hp")
+edge264_lib = os.path.join(h264_hp_dir, "edge264", "lib", "esp32p4", "libedge264.a")
+if os.path.exists(edge264_lib):
+    # -Wl,-u,sysconf : force l'inclusion de sysconf (newlib) que référence edge264,
+    # indépendamment de l'ordre de link (cf. validation CI).
+    env.Append(LINKFLAGS=["-Wl,-u,sysconf", edge264_lib])
+    print(f"[IP Camera Viewer] Linked libedge264.a (edge264 High Profile)")
+else:
+    print(f"[IP Camera Viewer]  libedge264.a not found (edge264 High Profile disabled)")
+
 print("[IP Camera Viewer] Build script completed")
