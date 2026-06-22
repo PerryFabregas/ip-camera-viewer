@@ -83,7 +83,7 @@ external_components:
   - source:
       type: git
       url: https://github.com/youkorr/lvgl_9.5
-      ref: main
+      ref: claude/jolly-lamport-ERZOC
     # lvgl + image + font : le fork inclut image/image.h et font/font.h
     # (sous USE_IMAGE / USE_FONT), donc ces composants doivent être chargés —
     # exactement comme dans les configs de youkorr. button/key_provider sont
