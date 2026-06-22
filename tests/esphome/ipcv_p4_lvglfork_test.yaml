@@ -70,7 +70,10 @@ external_components:
       type: git
       url: https://github.com/youkorr/lvgl_9.5
       ref: main
-    components: [lvgl, button, font, image, thorvg, lottie_state_machine]
+    # On ne liste que lvgl (comme dans tes configs) : il auto-charge ses
+    # dépendances lui-même. button/key_provider via AUTO_LOAD ; thorvg n'est
+    # pas un composant ESPHome (lib incluse au build, pas de __init__.py).
+    components: [lvgl]
     refresh: always
   - source:
       type: local
