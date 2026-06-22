@@ -4,9 +4,11 @@ from esphome.const import CONF_ID, CONF_URL
 import os
 
 DEPENDENCIES = ["wifi"]
-# h264_hp fournit le décodeur H.264 High Profile (edge264). Auto-chargé pour que
-# son libedge264.a soit linké et le flag USE_H264_HP_EDGE264 défini si dispo.
-AUTO_LOAD = ["h264_hp"]
+# Auto-chargés pour que l'utilisateur n'ait à mettre que [ip_camera_viewer] :
+#  - esp_h264 : fournit les en-têtes du décodeur (sinon esp_h264_dec.h introuvable
+#    car ESPHome exécute __init__.py depuis l'arbre copié, sans esp_h264).
+#  - h264_hp  : décodeur High Profile edge264 (libedge264.a).
+AUTO_LOAD = ["esp_h264", "h264_hp"]
 CODEOWNERS = ["@youkorr"]
 
 CONF_CANVAS_ID = "canvas_id"

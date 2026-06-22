@@ -11,7 +11,7 @@ CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32"]
 
 # Ce composant est une bibliothèque uniquement, pas de configuration utilisateur
-CONFIG_SCHEMA = cv.invalid("esp_h264 est un composant interne, ne pas l'utiliser directement dans le YAML")
+CONFIG_SCHEMA = cv.Schema({})  # composant interne tiré par ip_camera_viewer (AUTO_LOAD)
 
 async def to_code(config):
     """Configure le composant esp_h264 pour ESPHome"""

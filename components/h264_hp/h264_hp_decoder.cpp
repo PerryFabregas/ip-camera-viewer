@@ -8,7 +8,9 @@
 // mode "no-op" pour ne pas casser le build (USE_H264_HP_EDGE264 non défini).
 #if defined(USE_H264_HP_EDGE264)
 extern "C" {
-#include "edge264.h"
+// Chemin relatif au sous-dossier vendorisé : robuste sans dépendre d'un -I
+// (ESPHome copie h264_hp/ et son sous-dossier edge264/ dans l'arbre de build).
+#include "edge264/edge264.h"
 }
 #endif
 
