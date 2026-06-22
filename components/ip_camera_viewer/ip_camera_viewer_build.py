@@ -6,11 +6,20 @@ Compiles esp_h264 decoder sources and links openh264 library
 import os
 Import("env")
 
-script_dir = Dir('.').srcnode().abspath
-component_dir = script_dir
+# Le répertoire du composant est transmis par __init__.py via une option custom.
+# Dans un extra_script PlatformIO, Dir('.') pointe sur le répertoire PROJET, pas sur
+# le composant : on ne peut donc pas retrouver esp_h264/ et h264_hp/ par ce biais.
+component_dir = None
+try:
+    component_dir = env.GetProjectOption("custom_ipcv_component_dir")
+except Exception:
+    component_dir = None
+if not component_dir or not os.path.isdir(component_dir):
+    # Repli : ancien comportement (au cas où l'option ne serait pas disponible).
+    component_dir = Dir('.').srcnode().abspath
 parent_components_dir = os.path.dirname(component_dir)
 
-print("[IP Camera Viewer] Build script running...")
+print(f"[IP Camera Viewer] Build script running... (component_dir={component_dir})")
 
 # ========================================================================
 # H.264 decoder: compile sources + link library

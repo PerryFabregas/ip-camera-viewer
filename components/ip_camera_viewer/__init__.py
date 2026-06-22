@@ -62,8 +62,11 @@ async def to_code(config):
     cg.add_build_flag("-DCONFIG_JPEG_ENABLE_DEBUG_LOG=0")
     cg.add_build_flag("-DCONFIG_ESP_H264_DECODER=1")
 
-    # Add esp_h264 include paths for H.264 decoder headers
-    component_dir = os.path.dirname(__file__)
+    # Add esp_h264 include paths for H.264 decoder headers.
+    # IMPORTANT : os.path.abspath — au codegen __file__ peut être relatif ; sans
+    # abspath le test os.path.exists() ci-dessous échoue et les -I sont silencieusement
+    # ignorés (-> "esp_h264_dec.h: No such file or directory" à la compilation).
+    component_dir = os.path.dirname(os.path.abspath(__file__))
     parent_components_dir = os.path.dirname(component_dir)
     esp_h264_dir = os.path.join(parent_components_dir, "esp_h264")
     if os.path.exists(esp_h264_dir):
@@ -81,8 +84,12 @@ async def to_code(config):
             if os.path.exists(inc_path):
                 cg.add_build_flag(f"-I{inc_path}")
 
-    # Add PlatformIO build script for H.264 library linking and source compilation
-    build_script = os.path.join(os.path.dirname(__file__), "ip_camera_viewer_build.py")
+    # Add PlatformIO build script for H.264 library linking and source compilation.
+    # On transmet le chemin ABSOLU du composant au script via une option custom :
+    # dans un extra_script PlatformIO, Dir('.') = répertoire projet (pas le composant),
+    # donc le script ne peut pas retrouver seul esp_h264/ et h264_hp/ (-> link KO).
+    cg.add_platformio_option("custom_ipcv_component_dir", component_dir)
+    build_script = os.path.join(component_dir, "ip_camera_viewer_build.py")
     cg.add_platformio_option("extra_scripts", ["post:" + build_script])
 
     # Process each camera in the list
