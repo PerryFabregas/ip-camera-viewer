@@ -1,0 +1,50 @@
+name: ESPHome compile (esp32-p4)
+
+# Runs a full `esphome compile` for the ip_camera_viewer component on ESP32-P4.
+# This catches packaging errors (include paths, prebuilt-lib linking) in CI,
+# instead of on a tester's hardware. Runtime/video is NOT validated here.
+
+on:
+  push:
+    branches: [claude/test-coverage-analysis-2viujv]
+    paths:
+      - 'components/**'
+      - 'tests/esphome/**'
+      - '.github/workflows/esphome-compile.yml'
+  workflow_dispatch:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache ESPHome / PlatformIO / IDF
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.espressif
+            ~/.cache/pip
+          key: esphome-p4-${{ hashFiles('tests/esphome/ipcv_p4_test.yaml') }}
+          restore-keys: |
+            esphome-p4-
+
+      - name: Install ESPHome
+        run: |
+          python -m pip install --upgrade pip
+          pip install esphome
+          esphome version
+
+      - name: Validate config
+        run: esphome config tests/esphome/ipcv_p4_test.yaml
+
+      - name: Compile firmware
+        run: esphome compile tests/esphome/ipcv_p4_test.yaml

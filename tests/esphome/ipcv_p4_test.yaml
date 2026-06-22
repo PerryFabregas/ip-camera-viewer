@@ -1,0 +1,87 @@
+# =============================================================================
+# CI compile test for the ip_camera_viewer component on ESP32-P4 (esp-idf).
+#
+# Goal: reproduce a real `esphome compile` (same packaging path a user hits) so
+# header/include and link errors surface in CI instead of on a tester's hardware.
+# This does NOT validate runtime/video output — only that the firmware builds.
+#
+# Base (board + mipi_dsi display) mirrors ESPHome's own mipi_dsi test config.
+# WiFi via esp32_hosted (ESP32-C6) mirrors the official M5Stack Tab5 config; for
+# a compile-only build the pins just need to be valid.
+# =============================================================================
+
+esphome:
+  name: ipcv-p4-citest
+
+esp32:
+  board: esp32-p4-evboard
+  variant: esp32p4
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+logger:
+
+# ip_camera_viewer DEPENDENCIES = ["wifi"]. The P4 has no native radio; WiFi is
+# provided by the on-board ESP32-C6 over the hosted SDIO link.
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  slot: 1
+
+wifi:
+  ap:
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+display:
+  - platform: mipi_dsi
+    id: tab5_display
+    model: JC1060P470
+    enable_pin: GPIO22
+
+lvgl:
+  displays:
+    - display_id: tab5_display
+  pages:
+    - id: main_page
+      widgets:
+        - canvas:
+            id: cam_canvas
+            width: 640
+            height: 480
+
+external_components:
+  - source:
+      type: local
+      path: ../../components
+    components: [ip_camera_viewer, h264_hp, esp_h264]
+
+ip_camera_viewer:
+  - id: cam_test
+    protocol: rtsp
+    url: "rtsp://user:pass@192.168.1.50:554/h264Preview_01_sub"
+    canvas_id: cam_canvas
+    width: 640
+    height: 480
+    update_interval: 100ms
+
+switch:
+  - platform: ip_camera_viewer
+    name: "Cam test"
+    camera_id: cam_test
