@@ -70,10 +70,11 @@ external_components:
       type: git
       url: https://github.com/youkorr/lvgl_9.5
       ref: main
-    # On ne liste que lvgl (comme dans tes configs) : il auto-charge ses
-    # dépendances lui-même. button/key_provider via AUTO_LOAD ; thorvg n'est
-    # pas un composant ESPHome (lib incluse au build, pas de __init__.py).
-    components: [lvgl]
+    # lvgl + image + font : le fork inclut image/image.h et font/font.h
+    # (sous USE_IMAGE / USE_FONT), donc ces composants doivent être chargés —
+    # exactement comme dans les configs de youkorr. button/key_provider sont
+    # auto-chargés ; thorvg n'est pas un composant (lib incluse au build).
+    components: [lvgl, image, font]
     refresh: always
   - source:
       type: local
