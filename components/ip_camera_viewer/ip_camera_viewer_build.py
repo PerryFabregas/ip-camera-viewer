@@ -110,9 +110,15 @@ else:
 h264_hp_dir = os.path.join(parent_components_dir, "h264_hp")
 edge264_lib = os.path.join(h264_hp_dir, "edge264", "lib", "esp32p4", "libedge264.a")
 if os.path.exists(edge264_lib):
-    # -Wl,-u,sysconf : force l'inclusion de sysconf (newlib) que référence edge264,
-    # indépendamment de l'ordre de link (cf. validation CI).
-    env.Append(LINKFLAGS=["-Wl,-u,sysconf", edge264_lib])
+    # -Wl,-u,sysconf : force l'inclusion de sysconf (newlib) que référence edge264.
+    env.Append(LINKFLAGS=["-Wl,-u,sysconf"])
+    # IMPORTANT : libedge264.a doit être en position BIBLIOTHÈQUE (après les objets),
+    # pas dans LINKFLAGS. SCons place LINKFLAGS AVANT $SOURCES ; or ld ne tire d'une
+    # archive que les membres résolvant un symbole *déjà* indéfini. Placée avant
+    # h264_hp_decoder.cpp.o (qui référence edge264_*), l'archive est ignorée ->
+    # "undefined reference to edge264_alloc". En LIBS (via un noeud File), elle est
+    # scannée après les objets et les symboles edge264_* sont résolus (cf. link-test CI).
+    env.Append(LIBS=[File(edge264_lib)])
     print(f"[IP Camera Viewer] Linked libedge264.a (edge264 High Profile)")
 else:
     print(f"[IP Camera Viewer]  libedge264.a not found (edge264 High Profile disabled)")
