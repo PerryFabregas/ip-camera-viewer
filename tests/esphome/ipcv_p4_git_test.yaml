@@ -1,0 +1,85 @@
+# =============================================================================
+# CI compile test that pulls ip_camera_viewer over GIT — exactly like a real
+# user (and the friend testing on hardware) does. The other two configs use
+# `type: local`, which hides any bug specific to ESPHome's git-clone packaging
+# path (e.g. include dirs / prebuilt lib not surviving the clone→build copy).
+#
+# This MUST stay in sync with the local config; only the external_components
+# source differs (git instead of local).
+# =============================================================================
+
+esphome:
+  name: ipcv-p4-gittest
+
+esp32:
+  board: esp32-p4-evboard
+  variant: esp32p4
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+
+psram:
+  mode: hex
+  speed: 200MHz
+
+logger:
+
+esp32_hosted:
+  variant: esp32c6
+  active_high: true
+  clk_pin: GPIO12
+  cmd_pin: GPIO13
+  d0_pin: GPIO11
+  d1_pin: GPIO10
+  d2_pin: GPIO9
+  d3_pin: GPIO8
+  reset_pin: GPIO15
+  slot: 1
+
+wifi:
+  ap:
+
+esp_ldo:
+  - voltage: 2.5V
+    channel: 3
+
+display:
+  - platform: mipi_dsi
+    id: tab5_display
+    model: JC1060P470
+    enable_pin: GPIO22
+
+lvgl:
+  displays:
+    - tab5_display
+  pages:
+    - id: main_page
+      widgets:
+        - canvas:
+            id: cam_canvas
+            width: 640
+            height: 480
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/youkorr/ip-camera-viewer
+      ref: claude/test-coverage-analysis-2viujv
+    components: [ip_camera_viewer, h264_hp, esp_h264]
+    refresh: always
+
+ip_camera_viewer:
+  - id: cam_test
+    protocol: rtsp
+    url: "rtsp://user:pass@192.168.1.50:554/h264Preview_01_sub"
+    canvas_id: cam_canvas
+    width: 640
+    height: 480
+    update_interval: 100ms
+
+switch:
+  - platform: ip_camera_viewer
+    name: "Cam test"
+    camera_id: cam_test

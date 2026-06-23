@@ -4,9 +4,13 @@ name: ESPHome compile (esp32-p4)
 # This catches packaging errors (include paths, prebuilt-lib linking) in CI,
 # instead of on a tester's hardware. Runtime/video is NOT validated here.
 #
-# Two configs are built in parallel:
-#   - ipcv_p4_test.yaml ........... LVGL bundled with ESPHome (9.5.0)
-#   - ipcv_p4_lvglfork_test.yaml .. LVGL from youkorr/lvgl_9.5@main (the fork)
+# Three configs are built in parallel:
+#   - ipcv_p4_test.yaml ........... LVGL bundled with ESPHome, components via `type: local`
+#   - ipcv_p4_lvglfork_test.yaml .. LVGL from youkorr/lvgl_9.5 fork, components via `type: local`
+#   - ipcv_p4_git_test.yaml ....... components pulled via `type: git` — the SAME path a
+#                                   real user/tester hits. `type: local` hides bugs in
+#                                   ESPHome's git-clone packaging (nested headers / prebuilt
+#                                   lib not surviving the clone), so this config guards them.
 
 on:
   push:
@@ -27,6 +31,7 @@ jobs:
         config:
           - tests/esphome/ipcv_p4_test.yaml
           - tests/esphome/ipcv_p4_lvglfork_test.yaml
+          - tests/esphome/ipcv_p4_git_test.yaml
     name: compile (${{ matrix.config }})
     steps:
       - name: Checkout
