@@ -53,7 +53,19 @@ bool H264HpDecoder::begin(int n_threads) {
   // edge264_alloc(n_threads, log_cb, log_arg, log_mbs, alloc_cb, free_cb, alloc_arg)
   this->dec_ = edge264_alloc(n_threads, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
   if (this->dec_ == nullptr) {
-    ESP_LOGE(TAG, "edge264_alloc a échoué (PSRAM insuffisante ?)");
+    // edge264 alloue sa structure (~41 Ko) via aligned_alloc, routé vers la PSRAM
+    // par __wrap_aligned_alloc (composant edge264). Si ça échoue encore, on logge
+    // l'état des tas pour trancher : PSRAM pleine/indispo, ou wrap absent (build
+    // pas à jour -> la PSRAM montre alors un gros bloc libre mais l'alloc tombe en
+    // interne).
+    size_t ps_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t ps_big = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    size_t in_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t in_big = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGE(TAG,
+             "edge264_alloc a échoué (struct ~41 Ko). PSRAM: libre=%u bloc_max=%u | "
+             "INTERNE: libre=%u bloc_max=%u",
+             (unsigned) ps_free, (unsigned) ps_big, (unsigned) in_free, (unsigned) in_big);
     return false;
   }
   ESP_LOGI(TAG, "Décodeur H.264 High Profile prêt (edge264, %d thread(s))", n_threads);

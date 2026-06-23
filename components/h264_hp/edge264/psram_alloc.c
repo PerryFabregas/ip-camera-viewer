@@ -15,6 +15,7 @@
 #include <stddef.h>
 
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 
 // Provided by the GNU linker because of -Wl,--wrap=aligned_alloc.
 extern void *__real_aligned_alloc(size_t alignment, size_t size);
@@ -22,6 +23,13 @@ extern void *__real_aligned_alloc(size_t alignment, size_t size);
 void *__wrap_aligned_alloc(size_t alignment, size_t size) {
   if (size >= 8192) {
     void *p = heap_caps_aligned_alloc(alignment, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // Trace one-shot (preuve que le wrap est actif et que la PSRAM répond).
+    static int logged = 0;
+    if (!logged) {
+      logged = 1;
+      ESP_LOGI("edge264_psram", "aligned_alloc(%u, %u) -> PSRAM %s",
+               (unsigned) alignment, (unsigned) size, p ? "OK" : "ÉCHEC");
+    }
     if (p != NULL)
       return p;
     // PSRAM exhausted -> fall back to internal DRAM.

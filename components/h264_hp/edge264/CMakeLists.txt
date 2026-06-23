@@ -17,7 +17,7 @@ if(EXISTS "${_edge264_lib}")
     set(_edge264_srcs "psram_alloc.c")
 endif()
 
-idf_component_register(SRCS ${_edge264_srcs} INCLUDE_DIRS "." REQUIRES heap)
+idf_component_register(SRCS ${_edge264_srcs} INCLUDE_DIRS "." REQUIRES heap log)
 
 if(EXISTS "${_edge264_lib}")
     # add_prebuilt_library inscrit libedge264.a dans le groupe de link d'ESP-IDF :
