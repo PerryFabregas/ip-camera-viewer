@@ -21,7 +21,7 @@ import os
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components.esp32 import add_idf_component
+from esphome.components.esp32 import add_idf_component, add_idf_sdkconfig_option
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32"]
@@ -40,6 +40,21 @@ async def to_code(config):
         # active le code edge264 dans le wrapper (h264_hp_decoder.cpp).
         add_idf_component(name="edge264", path=edge264_dir)
         cg.add_build_flag("-DUSE_H264_HP_EDGE264")
+
+        # --- PSRAM pour l'allocation du décodeur ------------------------------
+        # edge264_alloc() alloue sa structure (~41 Ko) via aligned_alloc(). Par
+        # défaut le composant `psram` d'ESPHome configure la PSRAM en
+        # CONFIG_SPIRAM_USE_CAPS_ALLOC : la PSRAM n'est alors atteignable que par
+        # heap_caps_*, PAS par malloc/aligned_alloc -> edge264 ne voit que la DRAM
+        # interne (épuisée au runtime avec LVGL + MIPI-DSI) et echoue.
+        # On bascule le choix Kconfig sur USE_MALLOC : malloc/aligned_alloc peuvent
+        # alors puiser dans la PSRAM. Les petites allocations (< 16 Ko, souvent DMA)
+        # restent en interne. Indépendant de la propagation de -Wl,--wrap (qui peut
+        # ne pas passer selon le snapshot d'ESPHome dev).
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_CAPS_ALLOC", False)
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_MALLOC", True)
+        add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 16384)
+
         print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
     else:
         print(
