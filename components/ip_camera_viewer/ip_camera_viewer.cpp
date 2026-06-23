@@ -1633,22 +1633,41 @@ bool IPCameraViewer::fetch_rtp_frame_() {
   // Accumulate NAL units into h264_buffer_
   bool frame_complete = false;
 
+  // --- Diagnostic RTP (visible au niveau INFO toutes les ~100 lectures) -------
+  // Révèle POURQUOI aucune frame ne se forme : pas de data (eagain), framing
+  // interleaved KO (non '$'), mauvais canal, ou marker jamais vu.
+  static uint32_t d_calls = 0, d_eagain = 0, d_short = 0, d_nondollar = 0;
+  static uint32_t d_pkts = 0, d_bytes = 0, d_ch0 = 0, d_markers = 0;
+  static uint32_t d_nal_mask = 0;  // bit i = nal_type i vu
+  d_calls++;
+  if (d_calls % 100 == 0) {
+    // NAL types RTP : 1=P,5=IDR,7=SPS,8=PPS,24=STAP-A,28=FU-A
+    ESP_LOGI(TAG,
+             "RTP diag: calls=%u pkts=%u bytes=%u ch0=%u markers=%u | "
+             "eagain=%u short=%u nondollar=%u | nal_mask=0x%08x",
+             d_calls, d_pkts, d_bytes, d_ch0, d_markers, d_eagain, d_short,
+             d_nondollar, d_nal_mask);
+  }
+
   while (!frame_complete) {
     // Read interleaved header
     ssize_t len = recv(this->rtsp_socket_, header, 4, MSG_PEEK);
     if (len <= 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        d_eagain++;
         break;  // No more data available
       }
       return false;
     }
 
     if (len < 4) {
+      d_short++;
       break;  // Not enough data yet
     }
 
     // Check for interleaved marker
     if (header[0] != '$') {
+      d_nondollar++;
       // Skip non-interleaved data (could be RTSP response)
       char skip[1];
       recv(this->rtsp_socket_, skip, 1, 0);
@@ -1691,10 +1710,14 @@ bool IPCameraViewer::fetch_rtp_frame_() {
       break;  // Incomplete packet
     }
 
+    d_pkts++;
+    d_bytes += rtp_len;
+
     // Skip RTCP packets (channel 1)
     if (channel != 0) {
       continue;
     }
+    d_ch0++;
 
     if (rtp_len < 12) {
       continue;  // Invalid RTP packet
@@ -1702,6 +1725,8 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
     // RTP header
     uint8_t marker = (rtp_packet[1] >> 7) & 0x01;
+    if (marker)
+      d_markers++;
 
     int header_len = 12;  // Basic RTP header
 
@@ -1715,6 +1740,8 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
     // Check NAL unit type
     uint8_t nal_type = nal_data[0] & 0x1F;
+    if (nal_type < 32)
+      d_nal_mask |= (1u << nal_type);
 
     // H.264 NAL unit types:
     // 7 = SPS (Sequence Parameter Set)
