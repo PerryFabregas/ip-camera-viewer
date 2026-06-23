@@ -55,6 +55,13 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_MALLOC", True)
         add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 16384)
 
+        # --- Pile des threads worker edge264 ----------------------------------
+        # edge264 crée ses threads worker via pthread_create(..., NULL, ...) =>
+        # pile = CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (~3 Ko par défaut). Le
+        # décodage H.264 (CABAC, IDCT, déblocage) déborde largement -> "Fault" dans
+        # worker_loop sur le core 1. On agrandit la pile pthread par défaut.
+        add_idf_sdkconfig_option("CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT", 32768)
+
         print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
     else:
         print(
