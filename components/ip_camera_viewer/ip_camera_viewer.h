@@ -150,6 +150,14 @@ class IPCameraViewer : public Component {
   size_t h264_buffer_size_{0};
   size_t h264_data_len_{0};
 
+  // Persistent RTP-over-TCP reassembly buffer. The interleaved '$' frames split
+  // arbitrarily across recv()s on a non-blocking socket; we accumulate raw bytes
+  // here and parse only COMPLETE '$'-framed packets, never consuming a header
+  // before its payload has fully arrived (avoids permanent framing desync).
+  // Sized well above one interleaved packet (4 + RTP<=1500).
+  uint8_t rtp_acc_[8192]{0};
+  size_t rtp_acc_len_{0};
+
   // H264 SPS/PPS caching (required for proper decoder initialization)
   uint8_t sps_cache_[128]{0};  // SPS cache (typically < 50 bytes)
   size_t sps_len_{0};

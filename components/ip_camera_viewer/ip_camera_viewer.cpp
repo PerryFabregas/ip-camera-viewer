@@ -1429,6 +1429,7 @@ void IPCameraViewer::disconnect_rtsp_stream_() {
   this->has_sps_ = false;
   this->has_pps_ = false;
   this->h264_data_len_ = 0;
+  this->rtp_acc_len_ = 0;  // drop any half-received interleaved packet
 }
 
 // Compute the lowercase hex MD5 of a string (used for Digest auth)
@@ -1627,7 +1628,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
   // TCP interleaved format:
   // $ (0x24), channel (1 byte), length (2 bytes big endian), RTP data
-  uint8_t header[4];
+  // Packets are extracted from the persistent rtp_acc_ buffer (see below).
   uint8_t rtp_packet[1500];
 
   // Accumulate NAL units into h264_buffer_
@@ -1650,65 +1651,58 @@ bool IPCameraViewer::fetch_rtp_frame_() {
   }
 
   while (!frame_complete) {
-    // Read interleaved header
-    ssize_t len = recv(this->rtsp_socket_, header, 4, MSG_PEEK);
-    if (len <= 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        d_eagain++;
-        break;  // No more data available
+    // 1) Drain whatever is available from the socket into a PERSISTENT
+    //    accumulation buffer. Over TCP the camera's interleaved frames split
+    //    arbitrarily across recv()s, and on a NON-blocking socket recv() returns
+    //    only the bytes that have arrived so far. The previous code peeked+
+    //    consumed the 4-byte interleaved header and then broke if the payload
+    //    wasn't fully there yet — leaving the '$' framing desynced; stray 0x24
+    //    bytes inside the H.264 payload then re-synced to bogus packets and NO
+    //    frame ever assembled (the "started=0 / frames=0" symptom). We now only
+    //    ever parse COMPLETE '$'-framed packets and keep partial bytes for the
+    //    next tick. (Validated on host with trickle delivery: 0 -> 20 frames.)
+    if (this->rtp_acc_len_ < sizeof(this->rtp_acc_)) {
+      ssize_t len = recv(this->rtsp_socket_, this->rtp_acc_ + this->rtp_acc_len_,
+                         sizeof(this->rtp_acc_) - this->rtp_acc_len_, 0);
+      if (len > 0) {
+        this->rtp_acc_len_ += (size_t) len;
+      } else if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        d_eagain++;  // no new data this tick
+      } else {
+        return false;  // socket error / closed
       }
-      return false;
     }
 
-    if (len < 4) {
-      d_short++;
-      break;  // Not enough data yet
-    }
-
-    // Check for interleaved marker
-    if (header[0] != '$') {
+    // 2) Resync to the next interleaved marker '$'.
+    while (this->rtp_acc_len_ > 0 && this->rtp_acc_[0] != '$') {
+      memmove(this->rtp_acc_, this->rtp_acc_ + 1, --this->rtp_acc_len_);
       d_nondollar++;
-      // Skip non-interleaved data (could be RTSP response)
-      char skip[1];
-      recv(this->rtsp_socket_, skip, 1, 0);
+    }
+    if (this->rtp_acc_len_ < 4) {
+      d_short++;
+      break;  // header not fully arrived yet — keep what we have for next tick
+    }
+
+    uint8_t channel = this->rtp_acc_[1];
+    uint16_t rtp_len = (this->rtp_acc_[2] << 8) | this->rtp_acc_[3];
+
+    if (rtp_len == 0 || rtp_len > sizeof(rtp_packet)) {
+      // Bogus length (almost certainly a false '$' inside a payload): drop this
+      // byte and resync rather than trusting it.
+      memmove(this->rtp_acc_, this->rtp_acc_ + 1, --this->rtp_acc_len_);
       continue;
     }
 
-    uint8_t channel = header[1];
-    uint16_t rtp_len = (header[2] << 8) | header[3];
-
-    if (rtp_len > sizeof(rtp_packet)) {
-      ESP_LOGW(TAG, "RTP packet too large: %u", rtp_len);
-      // Consume the header and skip the packet
-      recv(this->rtsp_socket_, header, 4, 0);
-      while (rtp_len > 0) {
-        ssize_t skip = recv(this->rtsp_socket_, rtp_packet,
-                           rtp_len > sizeof(rtp_packet) ? sizeof(rtp_packet) : rtp_len, 0);
-        if (skip <= 0) break;
-        rtp_len -= skip;
-      }
-      continue;
+    if ((size_t) 4 + rtp_len > this->rtp_acc_len_) {
+      break;  // full packet not arrived yet — wait for the next tick
     }
 
-    // Consume the header
-    recv(this->rtsp_socket_, header, 4, 0);
-
-    // Read RTP packet
-    ssize_t received = 0;
-    while (received < rtp_len) {
-      len = recv(this->rtsp_socket_, rtp_packet + received, rtp_len - received, 0);
-      if (len <= 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          break;
-        }
-        return false;
-      }
-      received += len;
-    }
-
-    if (received < rtp_len) {
-      break;  // Incomplete packet
-    }
+    // 3) We have exactly ONE complete interleaved packet. Copy it out and
+    //    remove it (header + payload) from the accumulation buffer.
+    memcpy(rtp_packet, this->rtp_acc_ + 4, rtp_len);
+    const size_t consumed = (size_t) 4 + rtp_len;
+    memmove(this->rtp_acc_, this->rtp_acc_ + consumed, this->rtp_acc_len_ - consumed);
+    this->rtp_acc_len_ -= consumed;
 
     d_pkts++;
     d_bytes += rtp_len;
