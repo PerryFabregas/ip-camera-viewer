@@ -31,12 +31,18 @@ if(EXISTS "${_edge264_lib}")
     # MIPI-DSI) -> "edge264_alloc a échoué". On intercepte aligned_alloc pour router
     # les gros blocs vers la PSRAM (voir psram_alloc.c). --wrap doit être un flag de
     # LINK global de l'app, d'où idf_build_set_property.
+    # Deux mécanismes pour attacher --wrap au lien de l'app (selon la version
+    # d'ESPHome dev, l'un ou l'autre peut ne pas être honoré pour un composant
+    # ajouté par chemin) :
+    #  1) propriété de build globale ESP-IDF,
+    #  2) options de lien INTERFACE du composant (propagées via le graphe de deps).
+    # __wrap_aligned_alloc est dans psram_alloc.c (archive de CE composant) ; sans
+    # -u, ld résout les appels "wrappés" de libedge264.a AVANT d'examiner ce membre
+    # -> "undefined reference to __wrap_aligned_alloc". -u force le chargement.
     idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=aligned_alloc" APPEND)
-    # __wrap_aligned_alloc est défini dans psram_alloc.c (archive de CE composant).
-    # Sans -u, ld résout les appels "wrappés" de libedge264.a AVANT d'examiner ce
-    # membre d'archive -> "undefined reference to __wrap_aligned_alloc". -u force
-    # le linker à tirer le symbole (et donc psram_alloc.o) dès le départ.
     idf_build_set_property(LINK_OPTIONS "-Wl,-u,__wrap_aligned_alloc" APPEND)
+    target_link_options(${COMPONENT_LIB} INTERFACE
+        "-Wl,--wrap=aligned_alloc" "-Wl,-u,__wrap_aligned_alloc")
     message(STATUS "[edge264] libedge264.a linké ; aligned_alloc routé vers la PSRAM.")
 else()
     message(STATUS "[edge264] libedge264.a absent — High Profile indisponible.")

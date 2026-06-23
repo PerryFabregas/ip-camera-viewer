@@ -23,10 +23,12 @@ extern void *__real_aligned_alloc(size_t alignment, size_t size);
 void *__wrap_aligned_alloc(size_t alignment, size_t size) {
   if (size >= 8192) {
     void *p = heap_caps_aligned_alloc(alignment, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    // Trace one-shot (preuve que le wrap est actif et que la PSRAM répond).
-    static int logged = 0;
-    if (!logged) {
-      logged = 1;
+    // Trace (preuve que le wrap est actif + réponse PSRAM). On logge les gros blocs
+    // (~struct edge264) lors des 1res tentatives, donc DANS la fenêtre capturée
+    // (après démarrage caméra), pas seulement au boot.
+    static int n_logged = 0;
+    if (size >= 20000 && n_logged < 6) {
+      n_logged++;
       ESP_LOGI("edge264_psram", "aligned_alloc(%u, %u) -> PSRAM %s",
                (unsigned) alignment, (unsigned) size, p ? "OK" : "ÉCHEC");
     }

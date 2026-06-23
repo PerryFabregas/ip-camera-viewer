@@ -50,6 +50,26 @@ bool H264HpDecoder::begin(int n_threads) {
 #if defined(USE_H264_HP_EDGE264)
   if (this->dec_ != nullptr)
     return true;
+
+  // --- Diagnostic CONCLUANT (une seule fois) : comment se comporte aligned_alloc ?
+  // edge264 alloue son struct via aligned_alloc(64, sizeof). On teste ici, en
+  // direct, deux tailles ~42 Ko : un multiple de 64 et un NON-multiple.
+  //  - non-mult == NULL & mult != NULL -> aligned_alloc impose size%align (newlib),
+  //    et __wrap n'intercepte PAS (sinon heap_caps ignore la contrainte) -> wrap absent.
+  //  - les deux != NULL -> le tas répond ; si edge264 échoue quand même c'est ailleurs.
+  static bool diag_done = false;
+  if (!diag_done) {
+    diag_done = true;
+    void *t_mult = aligned_alloc(64, 42048);   // 42048 % 64 == 0
+    void *t_non = aligned_alloc(64, 42000);    // 42000 % 64 != 0
+    ESP_LOGW(TAG,
+             "diag aligned_alloc(64,…): 42048(mult64)=%p  42000(non-mult)=%p  "
+             "[non-mult NULL & mult OK => newlib impose size%%align & wrap PSRAM inactif]",
+             t_mult, t_non);
+    free(t_mult);
+    free(t_non);
+  }
+
   // edge264_alloc(n_threads, log_cb, log_arg, log_mbs, alloc_cb, free_cb, alloc_arg)
   this->dec_ = edge264_alloc(n_threads, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
   if (this->dec_ == nullptr) {
