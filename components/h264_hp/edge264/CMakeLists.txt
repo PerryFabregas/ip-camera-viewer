@@ -32,6 +32,11 @@ if(EXISTS "${_edge264_lib}")
     # les gros blocs vers la PSRAM (voir psram_alloc.c). --wrap doit être un flag de
     # LINK global de l'app, d'où idf_build_set_property.
     idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=aligned_alloc" APPEND)
+    # __wrap_aligned_alloc est défini dans psram_alloc.c (archive de CE composant).
+    # Sans -u, ld résout les appels "wrappés" de libedge264.a AVANT d'examiner ce
+    # membre d'archive -> "undefined reference to __wrap_aligned_alloc". -u force
+    # le linker à tirer le symbole (et donc psram_alloc.o) dès le départ.
+    idf_build_set_property(LINK_OPTIONS "-Wl,-u,__wrap_aligned_alloc" APPEND)
     message(STATUS "[edge264] libedge264.a linké ; aligned_alloc routé vers la PSRAM.")
 else()
     message(STATUS "[edge264] libedge264.a absent — High Profile indisponible.")
