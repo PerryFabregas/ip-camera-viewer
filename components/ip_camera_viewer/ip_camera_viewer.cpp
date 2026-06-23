@@ -1970,30 +1970,41 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
     bool got = false;
     h264_hp::DecodedFrame f;
     while (this->hp_decoder_.get_frame(&f)) {
-      const int w = f.width & ~1;   // dimensions paires (4:2:0)
-      const int h = f.height & ~1;
-      const int cw = w / 2, ch = h / 2;
-      const size_t need = (size_t) w * h + 2u * (size_t) cw * ch;
-      if (w > 0 && h > 0 && f.y && f.cb && f.cr && need <= this->yuv_buffer_size_) {
-        // Empaqueter en I420 contigu (Y|U|V), en retirant le padding de stride,
-        // car convert_yuv420_to_rgb565_ attend ce layout à width_/height_.
-        if ((w != this->width_ || h != this->height_)) {
+      const int sw = f.width & ~1;   // dimensions paires (4:2:0) du flux décodé
+      const int sh = f.height & ~1;
+      if (sw > 0 && sh > 0 && f.y && f.cb && f.cr) {
+        // Le canvas LVGL et convert_yuv420_to_rgb565_ sont FIXÉS à width_/height_
+        // (config YAML). On dispose donc l'image décodée dans un plan I420 à la
+        // taille CONFIGURÉE : on recadre (crop) si le flux est plus grand, on
+        // letterbox (bords noirs) s'il est plus petit. Conséquence : un mismatch
+        // de résolution donne TOUJOURS une image (jamais d'écran noir) et ne peut
+        // JAMAIS déborder yuv_buffer_ (= width_*height_*3/2). Cas nominal (flux ==
+        // config) : dw=width_, dh=height_ -> copie pleine, identique à avant.
+        const int dw = (sw < (int) this->width_ ? sw : (int) this->width_) & ~1;
+        const int dh = (sh < (int) this->height_ ? sh : (int) this->height_) & ~1;
+        const int cfg_cw = this->width_ / 2, cfg_ch = this->height_ / 2;
+        if (sw != (int) this->width_ || sh != (int) this->height_) {
           static bool warned = false;
           if (!warned) {
-            ESP_LOGW(TAG, "edge264: flux %dx%d != config %ux%u (ajuste width/height)",
-                     w, h, this->width_, this->height_);
+            ESP_LOGW(TAG, "edge264: flux %dx%d != config %ux%u — recadré/letterboxé. "
+                          "Ajuste width/height pour un rendu plein cadre.",
+                     sw, sh, this->width_, this->height_);
             warned = true;
           }
+          // Flux plus petit que la config : noircir une fois le buffer pour que
+          // les bords non remplis soient noirs (et non du contenu PSRAM résiduel).
+          if (dw < (int) this->width_ || dh < (int) this->height_)
+            memset(this->yuv_buffer_, 0, this->yuv_buffer_size_);
         }
-        uint8_t *dst = this->yuv_buffer_;
-        for (int row = 0; row < h; row++)
-          memcpy(dst + (size_t) row * w, f.y + (size_t) row * f.stride_y, w);
-        dst += (size_t) w * h;
-        for (int row = 0; row < ch; row++)
-          memcpy(dst + (size_t) row * cw, f.cb + (size_t) row * f.stride_c, cw);
-        dst += (size_t) cw * ch;
-        for (int row = 0; row < ch; row++)
-          memcpy(dst + (size_t) row * cw, f.cr + (size_t) row * f.stride_c, cw);
+        uint8_t *Y = this->yuv_buffer_;
+        uint8_t *U = Y + (size_t) this->width_ * this->height_;
+        uint8_t *V = U + (size_t) cfg_cw * cfg_ch;
+        for (int row = 0; row < dh; row++)
+          memcpy(Y + (size_t) row * this->width_, f.y + (size_t) row * f.stride_y, dw);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(U + (size_t) row * cfg_cw, f.cb + (size_t) row * f.stride_c, dw / 2);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(V + (size_t) row * cfg_cw, f.cr + (size_t) row * f.stride_c, dw / 2);
         got = true;
       }
       this->hp_decoder_.release_frame();
