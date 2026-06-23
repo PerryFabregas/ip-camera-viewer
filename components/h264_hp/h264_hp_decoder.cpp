@@ -98,22 +98,53 @@ DecodeStatus H264HpDecoder::decode_annexb(const uint8_t *data, size_t len) {
 #if defined(USE_H264_HP_EDGE264)
   if (this->dec_ == nullptr)
     return DecodeStatus::NO_DECODER;
-  const uint8_t *buf = data;
-  const uint8_t *end = data + len;
+  const uint8_t *const end = data + len;
+
+  // Découpe Annex-B DÉTERMINISTE (indépendante de edge264_find_start_code, dont
+  // l'offset de retour est ambigu). edge264_decode_NAL lit l'en-tête NAL à buf[0]
+  // (il NE saute PAS le start code) : on doit donc lui passer l'octet APRÈS le
+  // start code 00 00 01, et non le start code lui-même — sinon nal_unit_type est
+  // lu comme 0 (Unknown -> ENOTSUP) et rien n'est décodé.
+  auto find_sc = [end](const uint8_t *s) -> const uint8_t * {
+    for (const uint8_t *q = s; q + 3 <= end; q++) {
+      if (q[0] == 0 && q[1] == 0 && q[2] == 1)
+        return q;  // pointe sur le 00 00 01
+    }
+    return end;
+  };
+
   DecodeStatus last = DecodeStatus::NEED_MORE;
-  // Découpe Annex-B : avance de start-code en start-code.
-  const uint8_t *nal = edge264_find_start_code(buf, end, 0);
-  while (nal < end) {
-    const uint8_t *next = edge264_find_start_code(nal, end, 0);
-    int ret = edge264_decode_NAL(dec_of(this->dec_), nal, next, nullptr, nullptr);
-    if (ret < 0) {
+  int n_fed = 0, n_ok = 0;
+  const uint8_t *sc = find_sc(data);
+  while (sc < end) {
+    const uint8_t *nal = sc + 3;  // octet d'en-tête NAL (après 00 00 01)
+    if (nal >= end)
+      break;
+    const uint8_t *nsc = find_sc(nal);  // prochain start code (ou end)
+    const uint8_t *nal_end = nsc;
+    // Retirer le 0x00 de tête d'un éventuel start code 4 octets (00 00 00 01)
+    // qui appartient au start code SUIVANT, pas au corps de la NAL courante.
+    while (nal_end > nal && nal_end[-1] == 0)
+      nal_end--;
+
+    const uint8_t nut = nal[0] & 0x1f;  // nal_unit_type
+    int ret = edge264_decode_NAL(dec_of(this->dec_), nal, nal_end, nullptr, nullptr);
+    n_fed++;
+    if (ret == 0) {
+      n_ok++;
+      if (last != DecodeStatus::ERROR)
+        last = DecodeStatus::OK;
+    } else if (ret < 0 || ret == ENOTSUP || ret == EBADMSG || ret == EINVAL) {
       this->decode_errors_++;
       last = DecodeStatus::ERROR;
-    } else if (last != DecodeStatus::ERROR) {
-      last = DecodeStatus::OK;
     }
-    nal = next;
+    // ENODATA/ENOBUFS/ENOMSG = retours "doux" (fin de flux / DPB plein) : non
+    // comptés comme erreurs ; on continue.
+    ESP_LOGV(TAG, "NAL type=%u len=%d -> edge264_decode_NAL ret=%d", nut,
+             (int) (nal_end - nal), ret);
+    sc = nsc;
   }
+  ESP_LOGV(TAG, "decode_annexb: %d NAL fournis, %d acceptés (ret=0)", n_fed, n_ok);
   return last;
 #else
   (void) data; (void) len;

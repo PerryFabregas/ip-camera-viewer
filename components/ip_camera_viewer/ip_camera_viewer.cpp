@@ -275,7 +275,21 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
     no_frame_count++;
     if (no_frame_count == 100 || no_frame_count % 500 == 0) {
       if (cam->protocol_ == Protocol::RTSP) {
-        ESP_LOGW(TAG, "No H264 frames decoded yet (%u attempts)", no_frame_count);
+#ifdef USE_H264_HP_EDGE264
+        if (cam->use_hp_decoder_) {
+          // Surface l'état du décodeur edge264 au niveau WARN (logger par défaut) :
+          //  - decode_errors > 0  -> NAL mal fournies / flux refusé (problème de feed)
+          //  - errors == 0 & frames == 0 -> décode silencieux sans sortie (DPB / get_frame)
+          ESP_LOGW(TAG,
+                   "No H264 frames decoded yet (%u attempts) — edge264: frames=%u, "
+                   "decode_errors=%u, started=%d. Si decode_errors monte, le feed NAL "
+                   "est en cause ; sinon, la sortie get_frame. (logger VERBOSE pour le "
+                   "détail par NAL)",
+                   no_frame_count, cam->hp_decoder_.frames_decoded(),
+                   cam->hp_decoder_.decode_errors(), (int) cam->hp_started_);
+        } else
+#endif
+          ESP_LOGW(TAG, "No H264 frames decoded yet (%u attempts)", no_frame_count);
       } else {
         ESP_LOGW(TAG, "No JPEG frames decoded yet (%u attempts)", no_frame_count);
       }
