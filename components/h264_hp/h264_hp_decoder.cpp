@@ -51,41 +51,28 @@ bool H264HpDecoder::begin(int n_threads) {
   if (this->dec_ != nullptr)
     return true;
 
-  // --- Diagnostic CONCLUANT (une seule fois) : comment se comporte aligned_alloc ?
-  // edge264 alloue son struct via aligned_alloc(64, sizeof). On teste ici, en
-  // direct, deux tailles ~42 Ko : un multiple de 64 et un NON-multiple.
-  //  - non-mult == NULL & mult != NULL -> aligned_alloc impose size%align (newlib),
-  //    et __wrap n'intercepte PAS (sinon heap_caps ignore la contrainte) -> wrap absent.
-  //  - les deux != NULL -> le tas répond ; si edge264 échoue quand même c'est ailleurs.
-  static bool diag_done = false;
-  if (!diag_done) {
-    diag_done = true;
-    void *t_mult = aligned_alloc(64, 42048);   // 42048 % 64 == 0
-    void *t_non = aligned_alloc(64, 42000);    // 42000 % 64 != 0
-    ESP_LOGW(TAG,
-             "diag aligned_alloc(64,…): 42048(mult64)=%p  42000(non-mult)=%p  "
-             "[non-mult NULL & mult OK => newlib impose size%%align & wrap PSRAM inactif]",
-             t_mult, t_non);
-    free(t_mult);
-    free(t_non);
-  }
-
   // edge264_alloc(n_threads, log_cb, log_arg, log_mbs, alloc_cb, free_cb, alloc_arg)
+  // Le struct (~41 Ko) part en PSRAM (CONFIG_SPIRAM_USE_MALLOC + wrap). Mais avec
+  // n_threads>0, edge264_alloc crée des threads worker via pthread_create(), dont
+  // la pile FreeRTOS doit être en RAM interne : sur ce setup (LVGL + MIPI-DSI +
+  // PSRAM en mode malloc) ça échoue et edge264_alloc renvoie NULL. On retombe donc
+  // en MONO-THREAD (n_threads=0), qui ne crée aucun thread et renvoie dès que le
+  // struct est alloué — décodage plus lent mais fonctionnel (validé sur PC).
   this->dec_ = edge264_alloc(n_threads, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
+  if (this->dec_ == nullptr && n_threads > 0) {
+    ESP_LOGW(TAG,
+             "edge264_alloc(%d threads) a échoué (création des threads worker) — "
+             "repli en mono-thread.",
+             n_threads);
+    this->dec_ = edge264_alloc(0, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
+    if (this->dec_ != nullptr)
+      n_threads = 0;
+  }
   if (this->dec_ == nullptr) {
-    // edge264 alloue sa structure (~41 Ko) via aligned_alloc, routé vers la PSRAM
-    // par __wrap_aligned_alloc (composant edge264). Si ça échoue encore, on logge
-    // l'état des tas pour trancher : PSRAM pleine/indispo, ou wrap absent (build
-    // pas à jour -> la PSRAM montre alors un gros bloc libre mais l'alloc tombe en
-    // interne).
     size_t ps_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t ps_big = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     size_t in_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    size_t in_big = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    ESP_LOGE(TAG,
-             "edge264_alloc a échoué (struct ~41 Ko). PSRAM: libre=%u bloc_max=%u | "
-             "INTERNE: libre=%u bloc_max=%u",
-             (unsigned) ps_free, (unsigned) ps_big, (unsigned) in_free, (unsigned) in_big);
+    ESP_LOGE(TAG, "edge264_alloc a échoué même en mono-thread. PSRAM libre=%u INTERNE libre=%u",
+             (unsigned) ps_free, (unsigned) in_free);
     return false;
   }
   ESP_LOGI(TAG, "Décodeur H.264 High Profile prêt (edge264, %d thread(s))", n_threads);
