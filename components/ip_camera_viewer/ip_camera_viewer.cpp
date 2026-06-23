@@ -44,13 +44,13 @@ void IPCameraViewer::setup() {
       this->mark_failed();
       return;
     }
-  } else {
-    if (!this->init_h264_decoder_()) {
-      ESP_LOGE(TAG, "Failed to initialize H264 decoder");
-      this->mark_failed();
-      return;
-    }
   }
+  // RTSP/H264: the decoder is created LAZILY (see decode_h264_to_yuv_), NOT here.
+  // The H.264 profile is only known after the RTSP SDP is parsed. Eagerly creating
+  // the tinyH264/h264bsd Baseline decoder spawns its prebuilt RISC-V worker task,
+  // which faults ("Instruction address misaligned", core 1) on the ESP32-P4.
+  // High-profile streams are handled by edge264 (h264_hp) and must NEVER create
+  // that worker — so we defer the choice until the first frame is decoded.
 
   ESP_LOGI(TAG, "IP Camera Viewer initialized");
 }
@@ -105,15 +105,12 @@ void IPCameraViewer::loop() {
         ESP_LOGE(TAG, "Failed to reallocate buffers");
         return;
       }
-      // Also reinit decoder
+      // Also reinit decoder. Only JPEG is (re)created eagerly; the H264 decoder
+      // is lazy (see decode_h264_to_yuv_) so a High-profile stream never spawns
+      // the crashing tinyH264 worker.
       if (this->protocol_ == Protocol::MJPEG) {
         if (!this->init_jpeg_decoder_()) {
           ESP_LOGE(TAG, "Failed to reinitialize JPEG decoder");
-          return;
-        }
-      } else {
-        if (!this->init_h264_decoder_()) {
-          ESP_LOGE(TAG, "Failed to reinitialize H264 decoder");
           return;
         }
       }
@@ -1951,7 +1948,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 }
 
 bool IPCameraViewer::decode_h264_to_yuv_() {
-  if (this->h264_data_len_ == 0 || this->h264_decoder_ == nullptr) {
+  if (this->h264_data_len_ == 0) {
     return false;
   }
 
@@ -2004,6 +2001,17 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
     return got;
   }
 #endif
+
+  // Baseline path: lazily create the tinyH264/h264bsd decoder the first time we
+  // actually need it. Deferred from setup() on purpose — its prebuilt RISC-V
+  // worker faults ("Instruction address misaligned", core 1) on the ESP32-P4,
+  // and a High-profile stream (routed to edge264 above) must never spawn it.
+  if (this->h264_decoder_ == nullptr) {
+    if (!this->init_h264_decoder_()) {
+      this->h264_data_len_ = 0;
+      return false;
+    }
+  }
 
   esp_h264_dec_in_frame_t in_frame = {};
   in_frame.raw_data.buffer = this->h264_buffer_;
