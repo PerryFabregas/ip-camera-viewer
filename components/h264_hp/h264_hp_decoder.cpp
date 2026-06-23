@@ -36,7 +36,12 @@ static void psram_free_cb(void *samples, void *mbs, void * /*arg*/) {
   heap_caps_free(mbs);
 }
 
-static int log_cb(const char *str, void * /*arg*/) {
+// NOTE: la lib précompilée libedge264.a est bâtie SANS HAS_LOGS. Dans ce cas
+// edge264_alloc() fait `if (log_cb) return free(dec), NULL;` -> passer un log_cb
+// non-NULL fait ÉCHOUER l'alloc juste après le struct (avant les threads). On
+// passe donc nullptr comme log_cb (cf. begin()). Cette fonction reste pour un
+// éventuel build de la lib avec logs.
+[[maybe_unused]] static int log_cb(const char *str, void * /*arg*/) {
   ESP_LOGV(TAG, "edge264: %s", str);
   return 0;
 }
@@ -58,13 +63,15 @@ bool H264HpDecoder::begin(int n_threads) {
   // PSRAM en mode malloc) ça échoue et edge264_alloc renvoie NULL. On retombe donc
   // en MONO-THREAD (n_threads=0), qui ne crée aucun thread et renvoie dès que le
   // struct est alloué — décodage plus lent mais fonctionnel (validé sur PC).
-  this->dec_ = edge264_alloc(n_threads, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
+  // log_cb = nullptr : la lib précompilée n'a pas HAS_LOGS et REFUSE un log_cb
+  // non-NULL (return NULL juste après l'alloc du struct).
+  this->dec_ = edge264_alloc(n_threads, nullptr, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
   if (this->dec_ == nullptr && n_threads > 0) {
     ESP_LOGW(TAG,
              "edge264_alloc(%d threads) a échoué (création des threads worker) — "
              "repli en mono-thread.",
              n_threads);
-    this->dec_ = edge264_alloc(0, log_cb, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
+    this->dec_ = edge264_alloc(0, nullptr, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
     if (this->dec_ != nullptr)
       n_threads = 0;
   }
