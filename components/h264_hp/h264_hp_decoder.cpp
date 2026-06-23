@@ -8,9 +8,11 @@
 // mode "no-op" pour ne pas casser le build (USE_H264_HP_EDGE264 non défini).
 #if defined(USE_H264_HP_EDGE264)
 extern "C" {
-// Chemin relatif au sous-dossier vendorisé : robuste sans dépendre d'un -I
-// (ESPHome copie h264_hp/ et son sous-dossier edge264/ dans l'arbre de build).
-#include "edge264/edge264.h"
+// edge264.h est fourni par le composant ESP-IDF "edge264" (h264_hp/edge264/,
+// INCLUDE_DIRS "."), enregistré via add_idf_component. Son include public
+// remonte ici (le composant esphome REQUIERT les composants idf ajoutés), donc
+// l'en-tête se résout dans les deux moteurs de build (PlatformIO et CMake natif).
+#include "edge264.h"
 }
 #endif
 

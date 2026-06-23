@@ -5,17 +5,23 @@ Composant INTERNE (bibliothèque) : pas de configuration YAML propre. Destiné �
 remplacer le chemin tinyH264 (Baseline only) de ip_camera_viewer pour décoder
 les flux Main/High profile.
 
-STRATÉGIE (voir README) : edge264 n'a pas de backend GCC. On le compile UNE FOIS
-avec esp-clang (RISC-V) en une lib statique edge264/lib/esp32p4/libedge264.a, puis
-on la LINKE dans le build ESPHome/GCC. Le linkage est géré par CMakeLists.txt :
-- si libedge264.a est présent -> USE_H264_HP_EDGE264 + link, le wrapper décode ;
-- sinon -> wrapper no-op, build inchangé.
+STRATÉGIE : edge264 n'a pas de backend GCC ; il est précompilé en lib statique
+(edge264/lib/esp32p4/libedge264.a). On l'expose via un COMPOSANT ESP-IDF
+"edge264" (edge264/CMakeLists.txt) enregistré avec add_idf_component :
+- l'en-tête edge264.h devient public (résolu par #include "edge264.h") ;
+- libedge264.a est inscrite dans le groupe de link ESP-IDF.
+Cette voie fonctionne avec le moteur PlatformIO ET le moteur CMake/Ninja natif
+d'ESPHome (2026.7+). L'ancien extra_script PlatformIO ne tournait pas dans le
+build CMake natif — d'où les "edge264.h: No such file" sur esphome dev.
+
+Si libedge264.a est absent -> wrapper no-op, build inchangé.
 """
 
 import os
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome.components.esp32 import add_idf_component
 
 CODEOWNERS = ["@youkorr"]
 DEPENDENCIES = ["esp32"]
@@ -25,25 +31,18 @@ CONFIG_SCHEMA = cv.Schema({})  # composant interne tiré par ip_camera_viewer (A
 
 async def to_code(config):
     component_dir = os.path.dirname(os.path.abspath(__file__))
-    lib = os.path.join(component_dir, "edge264", "lib", "esp32p4", "libedge264.a")
-    has_header = os.path.exists(os.path.join(component_dir, "edge264", "edge264.h"))
+    edge264_dir = os.path.join(component_dir, "edge264")
+    lib = os.path.join(edge264_dir, "lib", "esp32p4", "libedge264.a")
 
     if os.path.exists(lib):
-        # ESPHome ignore le CMakeLists.txt des composants externes : on gère donc
-        # tout via cg/PlatformIO.
-        #  - -DUSE_H264_HP_EDGE264 : active le code edge264 dans le wrapper.
-        #  - -I : h264_hp_decoder.cpp inclut #include "edge264/edge264.h", donc le -I
-        #    doit pointer sur le RÉPERTOIRE PARENT (h264_hp), pas sur edge264/ lui-même,
-        #    sinon le compilateur cherche .../edge264/edge264/edge264.h (introuvable).
-        # Le LINK de libedge264.a est fait par ip_camera_viewer_build.py.
+        # Enregistre edge264/ comme composant ESP-IDF local. Son CMakeLists.txt
+        # expose edge264.h (include public) et linke libedge264.a. Le define
+        # active le code edge264 dans le wrapper (h264_hp_decoder.cpp).
+        add_idf_component(name="edge264", path=edge264_dir)
         cg.add_build_flag("-DUSE_H264_HP_EDGE264")
-        cg.add_build_flag("-I" + component_dir)
-        cg.add_build_flag("-I" + os.path.join(component_dir, "edge264"))
-        print("[h264_hp] libedge264.a présent — décodeur High Profile ACTIVÉ (link).")
-    elif has_header:
+        print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
+    else:
         print(
-            "[h264_hp] edge264 source vendorisée mais libedge264.a ABSENT (no-op). "
+            "[h264_hp] libedge264.a ABSENT — décodeur High Profile no-op. "
             "Génère-la : components/h264_hp/edge264/build_libedge264_esp32p4.sh (esp-clang)."
         )
-    else:
-        print("[h264_hp] edge264 absent — décodeur High Profile indisponible.")
