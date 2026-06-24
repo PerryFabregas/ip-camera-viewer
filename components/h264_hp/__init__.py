@@ -59,8 +59,14 @@ async def to_code(config):
         # edge264 crée ses threads worker via pthread_create(..., NULL, ...) =>
         # pile = CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (~3 Ko par défaut). Le
         # décodage H.264 (CABAC, IDCT, déblocage) déborde largement -> "Fault" dans
-        # worker_loop sur le core 1. On agrandit la pile pthread par défaut.
-        add_idf_sdkconfig_option("CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT", 32768)
+        # worker_loop sur le core 1.
+        # Mesure (hôte) : un décodage plein 640x480 High consomme ~20 Ko de pile.
+        # Sur RISC-V (overhead FreeRTOS/ISR, frames plus larges) 32 Ko se sont avérés
+        # insuffisants -> crash "Instruction address misaligned" core 1 PENDANT le
+        # décodage (adresse de retour écrasée par débordement). On passe à 96 Ko :
+        # marge ~4-5x la conso mesurée. ip_camera_viewer n'utilise plus qu'UN worker
+        # (begin(1)) -> une seule pile de 96 Ko.
+        add_idf_sdkconfig_option("CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT", 98304)
 
         print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
     else:
