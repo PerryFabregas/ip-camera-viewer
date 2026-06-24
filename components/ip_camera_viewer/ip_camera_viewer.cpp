@@ -1955,15 +1955,14 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
 #ifdef USE_H264_HP_EDGE264
   if (this->use_hp_decoder_) {
     if (!this->hp_started_) {
-      // 1 SEUL thread worker (pas 2). Le décodage edge264 consomme ~20 Ko de pile
-      // (mesuré sur hôte) ; sur RISC-V + overhead FreeRTOS ça frôle/dépasse les
-      // 32 Ko de pile pthread par défaut -> débordement dans le worker -> "Instruction
-      // address misaligned" sur le core 1 (adresse de retour corrompue). On passe la
-      // pile pthread à 96 Ko (h264_hp/__init__.py) ET on n'utilise qu'UN worker :
-      // décodage séquentiel (un draining get_frame propre par tick), moitié moins de
-      // RAM interne, et aucune course entre workers. Repli mono-thread si la création
-      // du thread échoue (begin gère le fallback en interne).
-      this->hp_started_ = this->hp_decoder_.begin(1);
+      // 2 threads worker (le P4 est dual-core). Avec 1 seul thread le décodage
+      // 640x480 High ne suivait pas le temps réel -> travail CPU continu -> la tâche
+      // idle est affamée -> reboot par le Task Watchdog (task_wdt). 2 threads doublent
+      // le débit : chaque cœur retombe en idle entre les frames (l'idle peut nourrir
+      // le WDT). Le débordement de pile d'origine est réglé par la pile pthread 96 Ko
+      // (h264_hp/__init__.py), donc begin(2) ne crashe plus en "instruction misaligned".
+      // Repli mono-thread si la création des threads échoue (begin gère le fallback).
+      this->hp_started_ = this->hp_decoder_.begin(2);
       if (!this->hp_started_) {
         ESP_LOGE(TAG, "edge264: échec d'initialisation du décodeur High Profile");
         this->h264_data_len_ = 0;

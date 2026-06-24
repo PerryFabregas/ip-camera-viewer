@@ -64,9 +64,17 @@ async def to_code(config):
         # Sur RISC-V (overhead FreeRTOS/ISR, frames plus larges) 32 Ko se sont avérés
         # insuffisants -> crash "Instruction address misaligned" core 1 PENDANT le
         # décodage (adresse de retour écrasée par débordement). On passe à 96 Ko :
-        # marge ~4-5x la conso mesurée. ip_camera_viewer n'utilise plus qu'UN worker
-        # (begin(1)) -> une seule pile de 96 Ko.
+        # marge ~4-5x la conso mesurée (2 workers begin(2) -> 2 piles de 96 Ko, en
+        # RAM interne ; OK car les framebuffers LVGL sont en PSRAM).
         add_idf_sdkconfig_option("CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT", 98304)
+
+        # --- Task Watchdog ----------------------------------------------------
+        # Le décodage vidéo est gourmand : un pic (1re IDR + init edge264 + 1er
+        # rendu LVGL) peut occuper un cœur > 5 s (timeout WDT par défaut) et affamer
+        # la tâche idle -> reboot par task_wdt_isr. On relève le timeout à 30 s pour
+        # absorber ces pics sans tuer la protection (un vrai blocage est toujours
+        # attrapé). 2 threads (begin 2) évitent en plus la saturation continue.
+        add_idf_sdkconfig_option("CONFIG_ESP_TASK_WDT_TIMEOUT_S", 30)
 
         print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
     else:
