@@ -1955,14 +1955,16 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
 #ifdef USE_H264_HP_EDGE264
   if (this->use_hp_decoder_) {
     if (!this->hp_started_) {
-      // 2 threads worker (le P4 est dual-core). Avec 1 seul thread le décodage
-      // 640x480 High ne suivait pas le temps réel -> travail CPU continu -> la tâche
-      // idle est affamée -> reboot par le Task Watchdog (task_wdt). 2 threads doublent
-      // le débit : chaque cœur retombe en idle entre les frames (l'idle peut nourrir
-      // le WDT). Le débordement de pile d'origine est réglé par la pile pthread 96 Ko
-      // (h264_hp/__init__.py), donc begin(2) ne crashe plus en "instruction misaligned".
-      // Repli mono-thread si la création des threads échoue (begin gère le fallback).
-      this->hp_started_ = this->hp_decoder_.begin(2);
+      // MONO-THREAD (begin(0)) : décodage SYNCHRONE, AUCUN thread worker.
+      // En multi-thread (begin 1/2), edge264 crée des pthreads ; sur les pthreads
+      // FreeRTOS d'ESP-IDF, loopTask se bloque dans decode_NAL/get_frame à attendre
+      // un worker qui n'avance plus (les 2 cœurs retombent IDLE) -> reboot par le
+      // Task Watchdog (loopTask affamée). Les pthreads Linux ne reproduisaient pas
+      // ce deadlock. begin(0) supprime toute la couche threads : decode_NAL décode
+      // en ligne et get_frame renvoie aussitôt (mode prouvé 30/30 sur PC). Le
+      // décodage (~20 Ko de pile) tourne sur loopTask : il faut donc
+      // loop_task_stack_size: 32768 dans la config esp32 (sinon débordement).
+      this->hp_started_ = this->hp_decoder_.begin(0);
       if (!this->hp_started_) {
         ESP_LOGE(TAG, "edge264: échec d'initialisation du décodeur High Profile");
         this->h264_data_len_ = 0;

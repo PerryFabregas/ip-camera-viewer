@@ -55,25 +55,22 @@ async def to_code(config):
         add_idf_sdkconfig_option("CONFIG_SPIRAM_USE_MALLOC", True)
         add_idf_sdkconfig_option("CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL", 16384)
 
-        # --- Pile des threads worker edge264 ----------------------------------
-        # edge264 crée ses threads worker via pthread_create(..., NULL, ...) =>
-        # pile = CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (~3 Ko par défaut). Le
-        # décodage H.264 (CABAC, IDCT, déblocage) déborde largement -> "Fault" dans
-        # worker_loop sur le core 1.
-        # Mesure (hôte) : un décodage plein 640x480 High consomme ~20 Ko de pile.
-        # Sur RISC-V (overhead FreeRTOS/ISR, frames plus larges) 32 Ko se sont avérés
-        # insuffisants -> crash "Instruction address misaligned" core 1 PENDANT le
-        # décodage (adresse de retour écrasée par débordement). On passe à 96 Ko :
-        # marge ~4-5x la conso mesurée (2 workers begin(2) -> 2 piles de 96 Ko, en
-        # RAM interne ; OK car les framebuffers LVGL sont en PSRAM).
-        add_idf_sdkconfig_option("CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT", 98304)
+        # --- edge264 en MONO-THREAD (begin(0)) : pas de pthread --------------
+        # Historique : en multi-thread (begin(1)/begin(2)), edge264 crée des threads
+        # worker via pthread. Sur les pthreads FreeRTOS d'ESP-IDF ça DEADLOCKE :
+        # loopTask appelle decode_NAL/get_frame et reste bloquée à attendre un worker
+        # qui n'avance plus (les 2 cœurs retombent IDLE) -> reboot par le Task
+        # Watchdog (loopTask). Les tests hôte ne le voyaient pas (pthreads Linux).
+        # ip_camera_viewer utilise donc begin(0) : décodage SYNCHRONE, aucun thread,
+        # aucun deadlock (mode prouvé 30/30 frames sur PC). Le décodage tourne alors
+        # sur loopTask (~20 Ko de pile mesurés) : régler loop_task_stack_size: 32768
+        # dans la config (esp32 -> framework -> advanced). On ne touche donc plus à
+        # CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT (plus aucun worker edge264).
 
         # --- Task Watchdog ----------------------------------------------------
-        # Le décodage vidéo est gourmand : un pic (1re IDR + init edge264 + 1er
-        # rendu LVGL) peut occuper un cœur > 5 s (timeout WDT par défaut) et affamer
-        # la tâche idle -> reboot par task_wdt_isr. On relève le timeout à 30 s pour
-        # absorber ces pics sans tuer la protection (un vrai blocage est toujours
-        # attrapé). 2 threads (begin 2) évitent en plus la saturation continue.
+        # Insurance : un pic ponctuel (1re IDR + init edge264 + 1er rendu LVGL) peut
+        # tenir loopTask occupée quelques secondes. On relève le timeout à 30 s pour
+        # ne pas rebooter sur ces pics (un vrai blocage reste attrapé).
         add_idf_sdkconfig_option("CONFIG_ESP_TASK_WDT_TIMEOUT_S", 30)
 
         print("[h264_hp] libedge264.a présent — High Profile ACTIVÉ (composant idf edge264).")
