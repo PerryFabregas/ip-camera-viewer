@@ -503,7 +503,14 @@ void *ADD_VARIANT(worker_loop)(void *arg) {
 			c.samples_mb[1] = c.t.samples_buffers[currPic] + (c.mbx + c.mby * c.t.stride[1]) * 8 + c.t.plane_size_Y;
 			c.samples_mb[2] = c.samples_mb[1] + (c.t.stride[1] >> 1);
 			c._mb = (Edge264Macroblock *)c.t.mb_buffer + c.mbx + c.mby * (c.t.pic_width_in_mbs + 1);
-			while (c.t.next_deblock_addr < c.CurrMbAddr) {
+			// Safety bound: a valid CurrMbAddr is always < total macroblocks. On some
+			// live streams a corrupted CurrMbAddr made this loop iterate ~millions of
+			// times, deblock_mb walking into wild PSRAM for >30 s -> Task Watchdog
+			// reboot. Cap at the frame size so the loop can never run away (no-op when
+			// CurrMbAddr is valid).
+			int _total_mbs = (int) c.t.pic_width_in_mbs * (int) c.t.pic_height_in_mbs;
+			int _deblock_end = c.CurrMbAddr < _total_mbs ? c.CurrMbAddr : _total_mbs;
+			while (c.t.next_deblock_addr < _deblock_end) {
 				deblock_mb(&c);
 				c.t.next_deblock_addr++;
 				c._mb++;

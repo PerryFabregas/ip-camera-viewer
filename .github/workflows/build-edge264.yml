@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     # Image officielle ESP-IDF : fournit riscv32-esp-elf-gcc (sysroot) + idf_tools.
     container:
-      image: espressif/idf:release-v5.3
+      image: espressif/idf:release-v5.5
     steps:
       - name: Checkout
         uses: actions/checkout@v4
