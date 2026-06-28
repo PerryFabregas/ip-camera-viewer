@@ -696,6 +696,33 @@ static const int8_t shz_mask[48] = {
 #define loada128(p) (*(i8x16*)(p))
 #define loada32x4(p0, p1, p2, p3) (i32x4){*(int32_t *)(p0), *(int32_t *)(p1), *(int32_t *)(p2), *(int32_t *)(p3)}
 #define loada64x2(p0, p1) (i64x2){*(int64_t *)(p0), *(int64_t *)(p1)}
+// On RISC-V (ESP32-P4) a misaligned wide load TRAPS (unlike x86/ARM, which tolerate
+// it, and unlike qemu-user, which emulates it transparently). edge264's 8x8 High-
+// Profile kernel reads the sample plane with these aligned wide accesses, but the
+// plane is not guaranteed 16-aligned here -> "Fault - Unknown" in add_idct8x8.
+// Route them through memcpy (trap-free narrow accesses, IDENTICAL values) for __riscv.
+#ifdef __riscv
+static inline i32x4 _rv_loada32(const void *p) { int32_t v; __builtin_memcpy(&v, p, sizeof v); return (i32x4){v}; }
+static inline i64x2 _rv_loada64(const void *p) { int64_t v; __builtin_memcpy(&v, p, sizeof v); return (i64x2){v}; }
+static inline i8x16 _rv_loada128(const void *p) { i8x16 v; __builtin_memcpy(&v, p, sizeof v); return v; }
+static inline i32x4 _rv_loada32x4(const void *p0, const void *p1, const void *p2, const void *p3) { int32_t a, b, c, d; __builtin_memcpy(&a, p0, 4); __builtin_memcpy(&b, p1, 4); __builtin_memcpy(&c, p2, 4); __builtin_memcpy(&d, p3, 4); return (i32x4){a, b, c, d}; }
+static inline i64x2 _rv_loada64x2(const void *p0, const void *p1) { int64_t a, b; __builtin_memcpy(&a, p0, 8); __builtin_memcpy(&b, p1, 8); return (i64x2){a, b}; }
+#undef loada32
+#undef loada64
+#undef loada128
+#undef loada32x4
+#undef loada64x2
+#define loada32(p) _rv_loada32(p)
+#define loada64(p) _rv_loada64(p)
+#define loada128(p) _rv_loada128(p)
+#define loada32x4(p0, p1, p2, p3) _rv_loada32x4(p0, p1, p2, p3)
+#define loada64x2(p0, p1) _rv_loada64x2(p0, p1)
+static inline void storea32(void *p, int32_t v) { __builtin_memcpy(p, &v, sizeof v); }
+static inline void storea64(void *p, int64_t v) { __builtin_memcpy(p, &v, sizeof v); }
+#else
+static inline void storea32(void *p, int32_t v) { *(int32_t *)p = v; }
+static inline void storea64(void *p, int64_t v) { *(int64_t *)p = v; }
+#endif
 #if SIMD == SSE
 	#define adds16(a, b) (i16x8)_mm_adds_epi16(a, b)
 	#define avgu8(a, b) (i8x16)_mm_avg_epu8(a, b)

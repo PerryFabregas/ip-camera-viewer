@@ -27,13 +27,18 @@ static const char *const TAG = "h264_hp";
 // (état macrobloc). Sur P4 ils sont volumineux -> PSRAM obligatoire.
 static void psram_alloc_cb(void **samples, unsigned samples_size, void **mbs,
                            unsigned mbs_size, int /*errno_on_fail*/, void * /*arg*/) {
-  *samples = heap_caps_aligned_alloc(64, samples_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  *mbs = heap_caps_aligned_alloc(64, mbs_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  // edge264's own internal_alloc makes ONE allocation with `mbs` contiguous right
+  // after `samples` (*mbs = *samples + samples_size). Some edge264 code relies on
+  // that adjacency, so we honour the same contract — two separate allocations can
+  // break it. Single 64-byte-aligned PSRAM block, mbs carved from it.
+  uint8_t *p = (uint8_t *) heap_caps_aligned_alloc(64, (size_t) samples_size + mbs_size,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  *samples = p;
+  *mbs = (p != nullptr) ? p + samples_size : nullptr;
 }
 
-static void psram_free_cb(void *samples, void *mbs, void * /*arg*/) {
-  heap_caps_free(samples);
-  heap_caps_free(mbs);
+static void psram_free_cb(void *samples, void * /*mbs*/, void * /*arg*/) {
+  heap_caps_free(samples);  // single block; mbs lives inside it
 }
 
 // NOTE: la lib précompilée libedge264.a est bâtie SANS HAS_LOGS. Dans ce cas

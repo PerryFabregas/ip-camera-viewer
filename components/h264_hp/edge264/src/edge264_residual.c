@@ -331,14 +331,14 @@ static void add_idct8x8(Edge264Context *ctx, int iYCbCr, uint8_t *dst0)
 		i64x2 u1 = packus16(p2, p3);
 		i64x2 u2 = packus16(p4, p5);
 		i64x2 u3 = packus16(p6, p7);
-		*(int64_t *)SADDR(dst0,  0) = u0[0];
-		*(int64_t *)SADDR(dst0,  1) = u0[1];
-		*(int64_t *)SADDR(dst0,  2) = u1[0];
-		*(int64_t *)SADDR(dst7, -4) = u1[1];
-		*(int64_t *)SADDR(dst0,  4) = u2[0];
-		*(int64_t *)SADDR(dst7, -2) = u2[1];
-		*(int64_t *)SADDR(dst7, -1) = u3[0];
-		*(int64_t *)SADDR(dst7,  0) = u3[1];
+		storea64(SADDR(dst0,  0), u0[0]);
+		storea64(SADDR(dst0,  1), u0[1]);
+		storea64(SADDR(dst0,  2), u1[0]);
+		storea64(SADDR(dst7, -4), u1[1]);
+		storea64(SADDR(dst0,  4), u2[0]);
+		storea64(SADDR(dst7, -2), u2[1]);
+		storea64(SADDR(dst7, -1), u3[0]);
+		storea64(SADDR(dst7,  0), u3[1]);
 	} // FIXME else 16bit
 }
 
