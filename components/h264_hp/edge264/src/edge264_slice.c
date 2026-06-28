@@ -1676,6 +1676,12 @@ static noinline void CAFUNC(parse_slice_data)
 	// advances, the loop never returns and add_idct8x8 is called forever -> Task
 	// Watchdog reboot. Capture the real frame size NOW (still valid) and stop at it.
 	unsigned _mb_limit = (unsigned) ctx->t.pic_width_in_mbs * (unsigned) ctx->t.pic_height_in_mbs;
+	// Absolute, incorruptible ceiling: if ctx->t is clobbered BEFORE this point,
+	// _mb_limit itself is wrong. 65536 MBs (~5000x3000) is far above anything this
+	// embedded target ever decodes, so it never truncates a legitimate frame, yet
+	// it makes an infinite slice loop physically impossible regardless of when the
+	// corruption strikes. This is the hard guarantee against a Task WDT reboot.
+	enum { _MB_ABS_MAX = 65536u };
 	int end_of_slice_flag = 0;
 	do {
 		#ifdef LOGS
@@ -1834,7 +1840,8 @@ static noinline void CAFUNC(parse_slice_data)
 		ctx->mbx++;
 		ctx->CurrMbAddr++;
 		ctx->mbCol++;
-		if (__builtin_expect(_mb_limit != 0 && (unsigned) ctx->CurrMbAddr >= _mb_limit, 0))
+		if (__builtin_expect((_mb_limit != 0 && (unsigned) ctx->CurrMbAddr >= _mb_limit) ||
+		                     (unsigned) ctx->CurrMbAddr >= _MB_ABS_MAX, 0))
 			return;  // frame full: never run past it, whatever pic_width became
 		if (ctx->mbx >= ctx->t.pic_width_in_mbs) {
 			mb++; // skip the empty macroblock at the edge
