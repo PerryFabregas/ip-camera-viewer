@@ -164,10 +164,10 @@ static noinline void add_idct4x4(Edge264Context *ctx, int iYCbCr, int DCidx, uin
 		i8x16 p0 = (i32x4){*(int32_t *)SADDR(p, 0), *(int32_t *)SADDR(p, 1)};
 		i8x16 p1 = (i32x4){*(int32_t *)SADDR(p, 2), *(int32_t *)SADDR(p, 3)};
 		i32x4 u = packus16(addlou8s16(p0, r0), addlou8s16(p1, r1));
-		*(int32_t *)SADDR(p, 0) = u[0];
-		*(int32_t *)SADDR(p, 1) = u[1];
-		*(int32_t *)SADDR(p, 2) = u[2];
-		*(int32_t *)SADDR(p, 3) = u[3];
+		storea32(SADDR(p, 0), u[0]);
+		storea32(SADDR(p, 1), u[1]);
+		storea32(SADDR(p, 2), u[2]);
+		storea32(SADDR(p, 3), u[3]);
 	}
 }
 
@@ -179,10 +179,10 @@ static void add_dc4x4(Edge264Context *ctx, int iYCbCr, int DCidx, uint8_t *p) {
 		i8x16 p0 = (i32x4){*(int32_t *)SADDR(p, 0), *(int32_t *)SADDR(p, 1)};
 		i8x16 p1 = (i32x4){*(int32_t *)SADDR(p, 2), *(int32_t *)SADDR(p, 3)};
 		i32x4 u = packus16(addlou8s16(p0, r), addlou8s16(p1, r));
-		*(int32_t *)SADDR(p, 0) = u[0];
-		*(int32_t *)SADDR(p, 1) = u[1];
-		*(int32_t *)SADDR(p, 2) = u[2];
-		*(int32_t *)SADDR(p, 3) = u[3];
+		storea32(SADDR(p, 0), u[0]);
+		storea32(SADDR(p, 1), u[1]);
+		storea32(SADDR(p, 2), u[2]);
+		storea32(SADDR(p, 3), u[3]);
 	}
 }
 

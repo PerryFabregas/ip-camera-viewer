@@ -485,8 +485,8 @@ static void deblock_CbCr_8bit(Edge264Context *ctx) {
 	
 	// first horizontal edge
 	if (mb->filter_edges & 2) {
-		i8x16 hY = (i64x2){*(int64_t *)(SADDR(p0, -4)), *(int64_t *)(SADDR(p0, -3))};
-		i8x16 hZ = (i64x2){*(int64_t *)(SADDR(p0, -2)), *(int64_t *)(SADDR(p0, -1))};
+		i8x16 hY = (i64x2){(loada64(SADDR(p0, -4))[0]), (loada64(SADDR(p0, -3))[0])};
+		i8x16 hZ = (i64x2){(loada64(SADDR(p0, -2))[0]), (loada64(SADDR(p0, -1))[0])};
 		if (mbB->mbIsInterFlag & mb->mbIsInterFlag) {
 			int64_t tC0e = ctx->tC0_l[6];
 			if (tC0e != -1)
@@ -494,31 +494,31 @@ static void deblock_CbCr_8bit(Edge264Context *ctx) {
 		} else {
 			DEBLOCK_CHROMA_HARD(hY, hZ, h0, h1, ctx->alpha_s[3], ctx->beta_s[3]);
 		}
-		*(int64_t *)SADDR(p0, -2) = ((i64x2)hZ)[0];
-		*(int64_t *)SADDR(p0, -1) = ((i64x2)hZ)[1];
+		storea64(SADDR(p0, -2), ((i64x2)hZ)[0]);
+		storea64(SADDR(p0, -1), ((i64x2)hZ)[1]);
 	}
 	mb->filter_edges = 0; // prevent redundant deblocking with deblock_idc==2 and ASO
-	*(int64_t *)SADDR(p0,  0) = ((i64x2)h0)[0];
-	*(int64_t *)SADDR(p0,  1) = ((i64x2)h0)[1];
-	*(int64_t *)SADDR(p0,  2) = ((i64x2)h1)[0];
-	*(int64_t *)SADDR(p7, -4) = ((i64x2)h1)[1];
+	storea64(SADDR(p0,  0), ((i64x2)h0)[0]);
+	storea64(SADDR(p0,  1), ((i64x2)h0)[1]);
+	storea64(SADDR(p0,  2), ((i64x2)h1)[0]);
+	storea64(SADDR(p7, -4), ((i64x2)h1)[1]);
 	
 	// second horizontal edge
 	int64_t tC0g = ctx->tC0_l[7];
 	if (tC0g != -1)
 		DEBLOCK_CHROMA_SOFT(h2, h3, h4, h5, ctx->alpha_s[0], ctx->beta_s[0], tC0g);
-	*(int64_t *)SADDR(p0,  4) = ((i64x2)h2)[0];
-	*(int64_t *)SADDR(p7, -2) = ((i64x2)h2)[1];
-	*(int64_t *)SADDR(p7, -1) = ((i64x2)h3)[0];
-	*(int64_t *)SADDR(p7,  0) = ((i64x2)h3)[1];
-	*(int64_t *)SADDR(p7,  1) = ((i64x2)h4)[0];
-	*(int64_t *)SADDR(p7,  2) = ((i64x2)h4)[1];
-	*(int64_t *)SADDR(pE, -4) = ((i64x2)h5)[0];
-	*(int64_t *)SADDR(p7,  4) = ((i64x2)h5)[1];
-	*(int64_t *)SADDR(pE, -2) = ((i64x2)h6)[0];
-	*(int64_t *)SADDR(pE, -1) = ((i64x2)h6)[1];
-	*(int64_t *)SADDR(pE,  0) = ((i64x2)h7)[0];
-	*(int64_t *)SADDR(pE,  1) = ((i64x2)h7)[1];
+	storea64(SADDR(p0,  4), ((i64x2)h2)[0]);
+	storea64(SADDR(p7, -2), ((i64x2)h2)[1]);
+	storea64(SADDR(p7, -1), ((i64x2)h3)[0]);
+	storea64(SADDR(p7,  0), ((i64x2)h3)[1]);
+	storea64(SADDR(p7,  1), ((i64x2)h4)[0]);
+	storea64(SADDR(p7,  2), ((i64x2)h4)[1]);
+	storea64(SADDR(pE, -4), ((i64x2)h5)[0]);
+	storea64(SADDR(p7,  4), ((i64x2)h5)[1]);
+	storea64(SADDR(pE, -2), ((i64x2)h6)[0]);
+	storea64(SADDR(pE, -1), ((i64x2)h6)[1]);
+	storea64(SADDR(pE,  0), ((i64x2)h7)[0]);
+	storea64(SADDR(pE,  1), ((i64x2)h7)[1]);
 }
 
 
@@ -626,22 +626,22 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 		i32x4 xe5 = ziphi16(xe0, xe2);
 		i32x4 xe6 = ziplo16(xe1, xe3);
 		i32x4 xe7 = ziphi16(xe1, xe3);
-		*(int32_t *)SADDR(p0,  0) = xe4[0];
-		*(int32_t *)SADDR(p0,  1) = xe4[1];
-		*(int32_t *)SADDR(p0,  2) = xe4[2];
-		*(int32_t *)SADDR(p7, -4) = xe4[3];
-		*(int32_t *)SADDR(p0,  4) = xe5[0];
-		*(int32_t *)SADDR(p7, -2) = xe5[1];
-		*(int32_t *)SADDR(p7, -1) = xe5[2];
-		*(int32_t *)SADDR(p7,  0) = xe5[3];
-		*(int32_t *)SADDR(p7,  1) = xe6[0];
-		*(int32_t *)SADDR(p7,  2) = xe6[1];
-		*(int32_t *)SADDR(pE, -4) = xe6[2];
-		*(int32_t *)SADDR(p7,  4) = xe6[3];
-		*(int32_t *)SADDR(pE, -2) = xe7[0];
-		*(int32_t *)SADDR(pE, -1) = xe7[1];
-		*(int32_t *)SADDR(pE,  0) = xe7[2];
-		*(int32_t *)SADDR(pE,  1) = xe7[3];
+		storea32(SADDR(p0,  0), xe4[0]);
+		storea32(SADDR(p0,  1), xe4[1]);
+		storea32(SADDR(p0,  2), xe4[2]);
+		storea32(SADDR(p7, -4), xe4[3]);
+		storea32(SADDR(p0,  4), xe5[0]);
+		storea32(SADDR(p7, -2), xe5[1]);
+		storea32(SADDR(p7, -1), xe5[2]);
+		storea32(SADDR(p7,  0), xe5[3]);
+		storea32(SADDR(p7,  1), xe6[0]);
+		storea32(SADDR(p7,  2), xe6[1]);
+		storea32(SADDR(pE, -4), xe6[2]);
+		storea32(SADDR(p7,  4), xe6[3]);
+		storea32(SADDR(pE, -2), xe7[0]);
+		storea32(SADDR(pE, -1), xe7[1]);
+		storea32(SADDR(pE,  0), xe7[2]);
+		storea32(SADDR(pE,  1), xe7[3]);
 		p0 += 4;
 		p7 += 4;
 		pE += 4;
@@ -708,14 +708,14 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 	}
 	
 	// load and transpose the right 8x16 matrix
-	i8x16 xa0 = *(i8x16 *)SADDR(p0,  0);
-	i8x16 xa1 = *(i8x16 *)SADDR(p0,  1);
-	i8x16 xa2 = *(i8x16 *)SADDR(p0,  2);
-	i8x16 xa3 = *(i8x16 *)SADDR(p7, -4);
-	i8x16 xa4 = *(i8x16 *)SADDR(p0,  4);
-	i8x16 xa5 = *(i8x16 *)SADDR(p7, -2);
-	i8x16 xa6 = *(i8x16 *)SADDR(p7, -1);
-	i8x16 xa7 = *(i8x16 *)SADDR(p7,  0);
+	i8x16 xa0 = loada128(SADDR(p0,  0));
+	i8x16 xa1 = loada128(SADDR(p0,  1));
+	i8x16 xa2 = loada128(SADDR(p0,  2));
+	i8x16 xa3 = loada128(SADDR(p7, -4));
+	i8x16 xa4 = loada128(SADDR(p0,  4));
+	i8x16 xa5 = loada128(SADDR(p7, -2));
+	i8x16 xa6 = loada128(SADDR(p7, -1));
+	i8x16 xa7 = loada128(SADDR(p7,  0));
 	i8x16 xb0 = ziphi8(xa0, xa1);
 	i8x16 xb1 = ziphi8(xa2, xa3);
 	i8x16 xb2 = ziphi8(xa4, xa5);
@@ -724,14 +724,14 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 	i8x16 xc1 = ziphi16(xb0, xb1);
 	i8x16 xc2 = ziplo16(xb2, xb3);
 	i8x16 xc3 = ziphi16(xb2, xb3);
-	i8x16 xa8 = *(i8x16 *)SADDR(p7,  1);
-	i8x16 xa9 = *(i8x16 *)SADDR(p7,  2);
-	i8x16 xaA = *(i8x16 *)SADDR(pE, -4);
-	i8x16 xaB = *(i8x16 *)SADDR(p7,  4);
-	i8x16 xaC = *(i8x16 *)SADDR(pE, -2);
-	i8x16 xaD = *(i8x16 *)SADDR(pE, -1);
-	i8x16 xaE = *(i8x16 *)SADDR(pE,  0);
-	i8x16 xaF = *(i8x16 *)SADDR(pE,  1);
+	i8x16 xa8 = loada128(SADDR(p7,  1));
+	i8x16 xa9 = loada128(SADDR(p7,  2));
+	i8x16 xaA = loada128(SADDR(pE, -4));
+	i8x16 xaB = loada128(SADDR(p7,  4));
+	i8x16 xaC = loada128(SADDR(pE, -2));
+	i8x16 xaD = loada128(SADDR(pE, -1));
+	i8x16 xaE = loada128(SADDR(pE,  0));
+	i8x16 xaF = loada128(SADDR(pE,  1));
 	i8x16 xb4 = ziphi8(xa8, xa9);
 	i8x16 xb5 = ziphi8(xaA, xaB);
 	i8x16 xb6 = ziphi8(xaC, xaD);
@@ -805,23 +805,23 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 	
 	// first horizontal edge
 	if (mb->filter_edges & 2) {
-		i8x16 hx = *(i8x16 *)SADDR(p0, -3);
-		i8x16 hy = *(i8x16 *)SADDR(p0, -2);
-		i8x16 hz = *(i8x16 *)SADDR(p0, -1);
+		i8x16 hx = loada128(SADDR(p0, -3));
+		i8x16 hy = loada128(SADDR(p0, -2));
+		i8x16 hz = loada128(SADDR(p0, -1));
 		if (mbB->mbIsInterFlag & mb->mbIsInterFlag) {
 			int tC0e = ctx->tC0_s[4];
 			if (tC0e != -1)
 				DEBLOCK_LUMA_SOFT(hx, hy, hz, h0, h1, h2, ctx->alpha[12], ctx->beta[12], tC0e);
 		} else if (ctx->alpha[12] != 0) {
-			i8x16 hw = *(i8x16 *)SADDR(p0, -4);
+			i8x16 hw = loada128(SADDR(p0, -4));
 			DEBLOCK_LUMA_HARD(hw, hx, hy, hz, h0, h1, h2, h3, ctx->alpha[12], ctx->beta[12]);
-			*(i8x16 *)SADDR(p0, -3) = hx;
+			storea128(SADDR(p0, -3), hx);
 		}
-		*(i8x16 *)SADDR(p0, -2) = hy;
-		*(i8x16 *)SADDR(p0, -1) = hz;
+		storea128(SADDR(p0, -2), hy);
+		storea128(SADDR(p0, -1), hz);
 	}
-	*(i8x16 *)SADDR(p0,  0) = h0;
-	*(i8x16 *)SADDR(p0,  1) = h1;
+	storea128(SADDR(p0,  0), h0);
+	storea128(SADDR(p0,  1), h1);
 	
 	// second horizontal edge
 	if (!mb->f.transform_size_8x8_flag) {
@@ -829,10 +829,10 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 		if (tC0f != -1)
 			DEBLOCK_LUMA_SOFT(h1, h2, h3, h4, h5, h6, ctx->alpha[0], ctx->beta[0], tC0f);
 	}
-	*(i8x16 *)SADDR(p0,  2) = h2;
-	*(i8x16 *)SADDR(p7, -4) = h3;
-	*(i8x16 *)SADDR(p0,  4) = h4;
-	*(i8x16 *)SADDR(p7, -2) = h5;
+	storea128(SADDR(p0,  2), h2);
+	storea128(SADDR(p7, -4), h3);
+	storea128(SADDR(p0,  4), h4);
+	storea128(SADDR(p7, -2), h5);
 	
 	// transpose the bottom 16x8 matrix
 	i8x16 xh0 = ziphi8(v0, v1);
@@ -872,10 +872,10 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 	int tC0g = ctx->tC0_s[6];
 	if (tC0g != -1)
 		DEBLOCK_LUMA_SOFT(h5, h6, h7, h8, h9, hA, ctx->alpha[0], ctx->beta[0], tC0g);
-	*(i8x16 *)SADDR(p7, -1) = h6;
-	*(i8x16 *)SADDR(p7,  0) = h7;
-	*(i8x16 *)SADDR(p7,  1) = h8;
-	*(i8x16 *)SADDR(p7,  2) = h9;
+	storea128(SADDR(p7, -1), h6);
+	storea128(SADDR(p7,  0), h7);
+	storea128(SADDR(p7,  1), h8);
+	storea128(SADDR(p7,  2), h9);
 	
 	// fourth horizontal edge
 	if (!mb->f.transform_size_8x8_flag) {
@@ -883,12 +883,12 @@ static void deblock_Y_8bit(Edge264Context *ctx) {
 		if (tC0h != -1)
 			DEBLOCK_LUMA_SOFT(h9, hA, hB, hC, hD, hE, ctx->alpha[0], ctx->beta[0], tC0h);
 	}
-	*(i8x16 *)SADDR(pE, -4) = hA;
-	*(i8x16 *)SADDR(p7,  4) = hB;
-	*(i8x16 *)SADDR(pE, -2) = hC;
-	*(i8x16 *)SADDR(pE, -1) = hD;
-	*(i8x16 *)SADDR(pE,  0) = hE;
-	*(i8x16 *)SADDR(pE,  1) = hF;
+	storea128(SADDR(pE, -4), hA);
+	storea128(SADDR(p7,  4), hB);
+	storea128(SADDR(pE, -2), hC);
+	storea128(SADDR(pE, -1), hD);
+	storea128(SADDR(pE,  0), hE);
+	storea128(SADDR(pE,  1), hF);
 	
 	// jump to chroma deblocking filter
 	deblock_CbCr_8bit(ctx);

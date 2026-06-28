@@ -719,9 +719,11 @@ static inline i64x2 _rv_loada64x2(const void *p0, const void *p1) { int64_t a, b
 #define loada64x2(p0, p1) _rv_loada64x2(p0, p1)
 static inline void storea32(void *p, int32_t v) { __builtin_memcpy(p, &v, sizeof v); }
 static inline void storea64(void *p, int64_t v) { __builtin_memcpy(p, &v, sizeof v); }
+static inline void storea128(void *p, i8x16 v) { __builtin_memcpy(p, &v, sizeof v); }
 #else
 static inline void storea32(void *p, int32_t v) { *(int32_t *)p = v; }
 static inline void storea64(void *p, int64_t v) { *(int64_t *)p = v; }
+static inline void storea128(void *p, i8x16 v) { *(i8x16 *)p = v; }
 #endif
 #if SIMD == SSE
 	#define adds16(a, b) (i16x8)_mm_adds_epi16(a, b)
