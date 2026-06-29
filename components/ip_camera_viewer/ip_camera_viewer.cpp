@@ -384,9 +384,19 @@ bool IPCameraViewer::init_buffers_() {
     ESP_LOGI(TAG, "Allocated parse buffer in PSRAM: %u bytes (2x JPEG buffer, saves SRAM!)",
              this->parse_buffer_size_);
   } else {
-    // Allocate H264 and YUV buffers
+    // Allocate H264 and YUV buffers.
+    // edge264's get_bytes() reads an unaligned 16-byte SIMD chunk and may over-read
+    // up to ~16 bytes past the NAL `end` we hand to edge264_decode_NAL (the extra
+    // bytes are masked out of the actual bitstream, but they ARE loaded). h264_buffer_
+    // is filled only up to h264_buffer_size_, so we over-allocate by a 64-byte guard
+    // and zero its tail: this honors edge264's documented over-read contract and
+    // prevents a rare out-of-bounds PSRAM read when the very last NAL ends close to
+    // the buffer limit. h264_buffer_size_ stays at MAX_H264_SIZE so fill logic is
+    // unchanged; the guard is pure slack behind valid data.
     this->h264_buffer_size_ = MAX_H264_SIZE;
-    this->h264_buffer_ = (uint8_t *)heap_caps_malloc(this->h264_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    this->h264_buffer_ = (uint8_t *)heap_caps_malloc(this->h264_buffer_size_ + 64, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (this->h264_buffer_ != nullptr)
+      memset(this->h264_buffer_ + this->h264_buffer_size_, 0, 64);
 
     // YUV420: width * height * 1.5 bytes
     this->yuv_buffer_size_ = this->width_ * this->height_ * 3 / 2;
