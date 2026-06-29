@@ -508,9 +508,21 @@ void *ADD_VARIANT(worker_loop)(void *arg) {
 			// times, deblock_mb walking into wild PSRAM for >30 s -> Task Watchdog
 			// reboot. Cap at the frame size so the loop can never run away (no-op when
 			// CurrMbAddr is valid).
+			//
+			// Capping only _deblock_end (the upper end) is NOT enough: a corrupted
+			// next_deblock_addr (e.g. a large NEGATIVE value from a clobbered ctx->t,
+			// observed as a 25 s loopTask hang with MEPC inside deblock_mb on the live
+			// stream) keeps "next_deblock_addr < _deblock_end" true for ~2 billion
+			// increments. So we ALSO sanitize the frame size and add an incorruptible
+			// iteration guard (_guard): the loop can run at most _total_mbs+1 times no
+			// matter how badly next_deblock_addr is corrupted. This makes a deblock
+			// Task-Watchdog reboot physically impossible.
 			int _total_mbs = (int) c.t.pic_width_in_mbs * (int) c.t.pic_height_in_mbs;
+			if (_total_mbs < 0 || _total_mbs > 65536)
+				_total_mbs = 65536;
 			int _deblock_end = c.CurrMbAddr < _total_mbs ? c.CurrMbAddr : _total_mbs;
-			while (c.t.next_deblock_addr < _deblock_end) {
+			int _guard = _total_mbs + 1;
+			while (c.t.next_deblock_addr < _deblock_end && --_guard >= 0) {
 				deblock_mb(&c);
 				c.t.next_deblock_addr++;
 				c._mb++;
