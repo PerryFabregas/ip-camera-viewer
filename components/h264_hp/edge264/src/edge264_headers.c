@@ -459,6 +459,24 @@ void *ADD_VARIANT(worker_loop)(void *arg) {
 		// wait until a task becomes available and reserve it
 		while (c.thread_id >= 0 && !c.d->ready_tasks)
 			pthread_cond_wait(&c.d->task_ready, &c.d->lock);
+		// Guard against ready_tasks == 0 here (ROOT CAUSE of the live-stream collapse).
+		// Line ~1291 only sets a task's "ready" bit when all reference frames it depends
+		// on are already decoded. A slice that references a frame MISSING from the DPB
+		// (e.g. a reference lost to RTP packet loss on a live stream, or a truncated /
+		// corrupt NAL) leaves ready_tasks == 0 — yet single-thread mode (begin(0)) calls
+		// worker_loop unconditionally (line ~1299). __builtin_ctz(0) below is UNDEFINED
+		// and returns a wild task_id, so "c.t = c.d->tasks[task_id]" reads a whole
+		// Edge264Task (~1.6 KB) OUT OF BOUNDS and fills c.t (pic_width_in_mbs,
+		// next_deblock_addr, the bitstream pointers...) with garbage. With asserts off
+		// (-DNDEBUG, the on-device build) this is silent and the decode collapses a few
+		// macroblocks later — exactly the "silent bug earlier, crash later" runaway we
+		// saw in deblock_mb / add_idct8x8. Reproduced on host with ASan by truncating a
+		// slice NAL. Bail out cleanly instead of corrupting decoder state.
+		if (__builtin_expect(!c.d->ready_tasks, 0)) {
+			if (c.thread_id < 0)
+				return (void *)0; // single-thread: nothing runnable (missing ref) — skip this slice
+			continue; // multi-thread: go back and wait for a task to become ready
+		}
 		assert((unsigned)c.d->ready_tasks - 1 < 65535); // 0 < ready_tasks < 65536
 		int task_id = __builtin_ctz(c.d->ready_tasks); // FIXME arbitrary selection for now
 		int currPic = c.d->taskPics[task_id];
