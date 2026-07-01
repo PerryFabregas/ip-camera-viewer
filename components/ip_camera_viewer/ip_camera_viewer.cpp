@@ -89,27 +89,32 @@ void IPCameraViewer::setup() {
 void IPCameraViewer::decode_task_fn_(void *arg) {
   IPCameraViewer *cam = static_cast<IPCameraViewer *>(arg);
   for (;;) {
-    // Inactif tant que le flux n'est pas prêt, ou si une frame déjà décodée n'a pas
-    // encore été affichée (handshake : on n'écrase pas current_decode_buffer_).
+    // Inactif tant que le flux n'est pas prêt.
     if (!cam->enabled_ || !cam->stream_connected_ || cam->protocol_ == Protocol::MJPEG ||
-        cam->rgb565_buffer_a_ == nullptr || cam->yuv_buffer_ == nullptr ||
-        cam->decode_frame_ready_.load(std::memory_order_acquire)) {
+        cam->rgb565_buffer_a_ == nullptr || cam->yuv_buffer_ == nullptr) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
 #ifdef USE_H264_HP_EDGE264
-    bool got = false;
+    // DÉCODER EN CONTINU, au rythme de la caméra — ne JAMAIS bloquer le décodage
+    // sur l'affichage. L'ancien code attendait que le loopTask consomme la frame
+    // convertie avant de décoder la suivante : dès que l'écran affichait moins
+    // vite que la caméra n'émet (15 fps), l'excédent s'accumulait dans le tampon
+    // TCP et côté caméra -> latence qui grossissait sans limite (~1 minute
+    // observée). On ne peut pas sauter le DÉCODAGE d'une P-frame (elles se
+    // référencent en chaîne), mais on peut sauter sa CONVERSION/AFFICHAGE : si
+    // l'écran n'a pas encore consommé la frame précédente, la frame décodée est
+    // simplement abandonnée (le DPB, lui, reste à jour). La latence reste ~0 et
+    // c'est le rythme d'affichage qui régule, plus la file d'attente.
     if (cam->fetch_rtp_frame_()) {
-      if (cam->decode_h264_to_yuv_()) {
+      if (cam->decode_h264_to_yuv_() &&
+          !cam->decode_frame_ready_.load(std::memory_order_acquire)) {
         cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
                                        cam->width_, cam->height_);
-        got = true;
+        // Release : la frame convertie dans current_decode_buffer_ est visible pour
+        // le loopTask qui la lira après avoir vu decode_frame_ready_ == true.
+        cam->decode_frame_ready_.store(true, std::memory_order_release);
       }
-    }
-    if (got) {
-      // Release : la frame convertie dans current_decode_buffer_ est visible pour le
-      // loopTask qui la lira après avoir vu decode_frame_ready_ == true.
-      cam->decode_frame_ready_.store(true, std::memory_order_release);
     } else {
       vTaskDelay(pdMS_TO_TICKS(3));
     }
