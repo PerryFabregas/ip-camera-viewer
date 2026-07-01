@@ -12,6 +12,8 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/md5.h"
 #include "esp_task_wdt.h"
+#include "esp_rom_sys.h"  // esp_rom_get_cpu_ticks_per_us (diag fréquence CPU)
+#include "esp_timer.h"    // esp_timer_get_time (diag temps de décodage isolé)
 
 namespace esphome {
 namespace ip_camera_viewer {
@@ -31,6 +33,11 @@ void IPCameraViewer::setup() {
   ESP_LOGI(TAG, "  Protocol: %s", this->protocol_ == Protocol::RTSP ? "RTSP/H264" : "MJPEG");
   ESP_LOGI(TAG, "  Resolution: %ux%u", this->width_, this->height_);
   ESP_LOGI(TAG, "  Update interval: %u ms", this->update_interval_);
+  // DIAG perf: la vitesse de décodage edge264 dépend DIRECTEMENT de la fréquence
+  // CPU. Si le P4 ne tourne pas à sa fréquence max (~360-400 MHz), le décodage est
+  // ralenti d'autant. On log la fréquence réelle pour lever le doute (ticks/us = MHz).
+  ESP_LOGI(TAG, "  CPU frequency: %u MHz (max P4 = 360-400 MHz)",
+           (unsigned) esp_rom_get_cpu_ticks_per_us());
 
   if (!this->init_buffers_()) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
@@ -1996,7 +2003,16 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
     }
 
     // Fournir le flux Annex-B accumulé (SPS/PPS + slices) à edge264.
+    // DIAG perf : chrono ISOLÉ du décodage (µs) pour le séparer de la conversion
+    // YUV->RGB et du rendu LVGL. Le "lvgl took a long time" englobe tout ; ici on
+    // sait exactement combien coûte edge264 seul, et donc le temps par macrobloc.
+    const int64_t _dec_t0 = esp_timer_get_time();
     this->hp_decoder_.decode_annexb(this->h264_buffer_, this->h264_data_len_);
+    const int64_t _dec_us = esp_timer_get_time() - _dec_t0;
+    if (_dec_us > 3000)  // ne logge que les passes coûteuses (typiquement une IDR)
+      ESP_LOGW(TAG, "edge264 decode: %lld ms pour %u octets (%u MB config)",
+               (long long) (_dec_us / 1000), (unsigned) this->h264_data_len_,
+               (unsigned) ((this->width_ / 16) * (this->height_ / 16)));
     this->h264_data_len_ = 0;
 
     bool got = false;
