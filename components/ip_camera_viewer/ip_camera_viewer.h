@@ -177,6 +177,17 @@ class IPCameraViewer : public Component {
   uint8_t rtp_acc_[8192]{0};
   size_t rtp_acc_len_{0};
 
+  // Régulateur de latence : quand le décodage ne suit plus le débit de la
+  // caméra (P-frames chargées : bruit IR nocturne, mouvement), le backlog TCP
+  // grossit sans limite -> flux "au ralenti" avec un retard qui s'accumule.
+  // Détection : socket saturé (FIONREAD + accumulateur > seuil) plusieurs
+  // contrôles de suite -> on jette les P-frames SANS les décoder jusqu'à la
+  // prochaine IDR (impossible de sauter une P isolée, elles se référencent en
+  // chaîne), puis reprise en direct. Latence bornée à ~1 GOP au pire.
+  bool catchup_skip_to_idr_{false};
+  uint32_t catchup_last_check_{0};
+  uint8_t catchup_full_ticks_{0};
+
   // H264 SPS/PPS caching (required for proper decoder initialization)
   uint8_t sps_cache_[128]{0};  // SPS cache (typically < 50 bytes)
   size_t sps_len_{0};

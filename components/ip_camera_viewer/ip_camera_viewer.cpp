@@ -9,6 +9,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <sys/select.h>
+#include <sys/ioctl.h>  // FIONREAD (mesure du backlog TCP, régulateur de latence)
 #include "mbedtls/base64.h"
 #include "mbedtls/md5.h"
 #include "esp_task_wdt.h"
@@ -1750,6 +1751,38 @@ bool IPCameraViewer::fetch_rtp_frame_() {
   // Packets are extracted from the persistent rtp_acc_ buffer (see below).
   uint8_t rtp_packet[1500];
 
+  // --- Régulateur de latence (voir ip_camera_viewer.h) ----------------------
+  // Si le socket reste saturé plusieurs contrôles de suite, le décodage est en
+  // retard durable sur la caméra (P-frames lourdes : nuit IR, mouvement) : on
+  // passe en rattrapage — les P-frames sont drainées SANS décodage jusqu'à la
+  // prochaine IDR, puis on reprend en direct. Sans ça, le retard s'accumule
+  // sans limite (flux "au ralenti", minutes d'écart avec le direct).
+  uint32_t now_catchup = millis();
+  if (now_catchup - this->catchup_last_check_ >= 500) {
+    this->catchup_last_check_ = now_catchup;
+    int pending = 0;
+    if (ioctl(this->rtsp_socket_, FIONREAD, &pending) < 0)
+      pending = 0;
+    // Seuil : la fenêtre TCP lwip plafonne FIONREAD (souvent ~5,7 Ko) — 4 Ko en
+    // attente permanente = le décodeur ne draine plus, le reste s'empile côté
+    // caméra (invisible d'ici). Quand le décodage suit, le socket se vide entre
+    // deux frames et le compteur retombe à zéro.
+    if ((size_t) pending + this->rtp_acc_len_ > 4096) {
+      if (this->catchup_full_ticks_ < 255)
+        this->catchup_full_ticks_++;
+    } else {
+      this->catchup_full_ticks_ = 0;
+    }
+    // ~2 s de saturation continue (4 contrôles) : une simple rafale IDR (~15 Ko,
+    // drainée en <1 s) ne déclenche pas ; un retard structurel, oui.
+    if (!this->catchup_skip_to_idr_ && this->catchup_full_ticks_ >= 4) {
+      this->catchup_skip_to_idr_ = true;
+      this->h264_data_len_ = 0;  // jeter la frame partiellement assemblée
+      ESP_LOGW(TAG, "Décodage en retard sur la caméra (socket saturé >2 s) — saut des "
+                    "P-frames jusqu'à la prochaine IDR pour rester en direct.");
+    }
+  }
+
   // Accumulate NAL units into h264_buffer_
   bool frame_complete = false;
 
@@ -1893,6 +1926,17 @@ bool IPCameraViewer::fetch_rtp_frame_() {
     } else if (nal_type >= 1 && nal_type <= 23) {
       // Picture NAL unit (I-frame, P-frame, etc.)
 
+      // Rattrapage de latence : P-frames drainées sans décodage jusqu'à une IDR.
+      if (this->catchup_skip_to_idr_) {
+        if (nal_type == 5) {
+          this->catchup_skip_to_idr_ = false;
+          this->catchup_full_ticks_ = 0;
+          ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+        } else {
+          continue;  // P-frame jetée (consommée du buffer, jamais décodée)
+        }
+      }
+
       // CRITICAL FIX: Send SPS/PPS with the FIRST frame received (not just I-frames)
       // Without this, if stream starts with P-frames, decoder never gets param sets
       if (!this->param_sets_sent_ && this->has_sps_ && this->has_pps_) {
@@ -1995,6 +2039,17 @@ bool IPCameraViewer::fetch_rtp_frame_() {
       uint8_t fu_header = nal_data[1];
       bool start = (fu_header >> 7) & 0x01;
       uint8_t fu_type = fu_header & 0x1F;
+
+      // Rattrapage de latence : fragments jetés jusqu'au début d'une IDR (FU type 5).
+      if (this->catchup_skip_to_idr_) {
+        if (start && fu_type == 5) {
+          this->catchup_skip_to_idr_ = false;
+          this->catchup_full_ticks_ = 0;
+          ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+        } else {
+          continue;  // fragment jeté (consommé du buffer, jamais décodé)
+        }
+      }
 
       if (start) {
         // Start of fragmented NAL
