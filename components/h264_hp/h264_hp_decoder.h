@@ -79,6 +79,10 @@ class H264HpDecoder {
   // Opaque vers Edge264Decoder pour ne pas imposer l'include edge264.h ici.
   void *dec_{nullptr};
   bool frame_borrowed_{false};
+  // Jeton renvoyé par edge264_get_frame (borrow=1) identifiant le buffer emprunté
+  // (bitmask 1<<pic). DOIT être repassé à edge264_return_frame pour libérer le slot
+  // DPB — sinon output_frames ne se vide jamais et le décodeur finit en ENOBUFS.
+  void *frame_return_arg_{nullptr};
   uint32_t frames_decoded_{0};
   uint32_t decode_errors_{0};
 };

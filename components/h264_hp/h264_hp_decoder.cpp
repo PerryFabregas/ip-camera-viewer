@@ -197,6 +197,10 @@ bool H264HpDecoder::get_frame(DecodedFrame *out) {
     return false;  // pas de frame disponible
 
   this->frame_borrowed_ = true;
+  // Mémoriser le jeton d'emprunt (1<<pic) : release_frame() DOIT le repasser à
+  // edge264_return_frame pour libérer le slot DPB. Sinon output_frames ne se vide
+  // jamais et le décodeur tombe en ENOBUFS après ~max_dec_frame_buffering frames.
+  this->frame_return_arg_ = f.return_arg;
   this->frames_decoded_++;
 
   out->y = f.samples[0];
@@ -224,7 +228,11 @@ bool H264HpDecoder::get_frame(DecodedFrame *out) {
 void H264HpDecoder::release_frame() {
 #if defined(USE_H264_HP_EDGE264)
   if (this->dec_ != nullptr && this->frame_borrowed_) {
-    edge264_return_frame(dec_of(this->dec_), nullptr);
+    // Passer le return_arg mémorisé (PAS nullptr) : edge264_return_frame fait
+    // output_frames &= ~return_arg. Avec nullptr (0) ça ne libère RIEN -> fuite de
+    // slots DPB -> ENOBUFS. Avec le bon jeton, le slot est rendu au décodeur.
+    edge264_return_frame(dec_of(this->dec_), this->frame_return_arg_);
+    this->frame_return_arg_ = nullptr;
     this->frame_borrowed_ = false;
   }
 #endif
