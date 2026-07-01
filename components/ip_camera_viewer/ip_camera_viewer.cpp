@@ -413,6 +413,19 @@ bool IPCameraViewer::init_buffers_() {
 }
 
 void IPCameraViewer::free_buffers_() {
+#ifdef USE_H264_HP_EDGE264
+  // Release the edge264 High Profile decoder FIRST — it holds the largest PSRAM
+  // consumer of all: several MB of DPB frame buffers. If it is left allocated
+  // across a disable/enable toggle, PSRAM stays too full/fragmented to reallocate
+  // the 1.2 MB of RGB565 buffers on re-enable ("Failed to allocate aligned RGB565
+  // buffers"). The decoder is lazily re-created on the first decode after
+  // re-enable (see decode_h264_to_yuv_), so freeing it here is safe.
+  if (this->hp_started_) {
+    this->hp_decoder_.end();
+    this->hp_started_ = false;
+  }
+#endif
+
   // Free RGB565 buffers
   if (this->rgb565_buffer_a_ != nullptr) {
     free(this->rgb565_buffer_a_);
