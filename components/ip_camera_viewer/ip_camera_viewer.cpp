@@ -59,7 +59,64 @@ void IPCameraViewer::setup() {
   // High-profile streams are handled by edge264 (h264_hp) and must NEVER create
   // that worker — so we defer the choice until the first frame is decoded.
 
+  // Tâche de décodage H.264 dédiée : décode en fond pour ne PAS geler LVGL pendant
+  // les ~11 s d'une I-frame (solution validée avec le dev ESPHome). Pile en RAM
+  // interne 28 Ko (le décodage y a besoin de ~20 Ko ; pile PSRAM interdite car une
+  // écriture flash/NVS pendant le décodage désactive le cache -> crash). Si la
+  // création échoue (RAM interne insuffisante — pense à retirer micro_wake_word),
+  // decode_task_handle_ reste nullptr et on décode en ligne (repli sûr).
+  if (this->protocol_ == Protocol::RTSP) {
+    BaseType_t ok = xTaskCreatePinnedToCore(&IPCameraViewer::decode_task_fn_, "ipcv_decode",
+                                            28672, this, 1, &this->decode_task_handle_,
+                                            tskNO_AFFINITY);
+    if (ok != pdPASS || this->decode_task_handle_ == nullptr) {
+      this->decode_task_handle_ = nullptr;
+      ESP_LOGW(TAG, "Tâche de décodage dédiée NON créée (RAM interne ?) — décodage en "
+                    "ligne (LVGL peut geler pendant une I-frame). Libère de la RAM interne "
+                    "(ex. retire micro_wake_word) pour l'activer.");
+    } else {
+      ESP_LOGI(TAG, "Tâche de décodage H.264 dédiée active — LVGL ne gèlera plus.");
+    }
+  }
+
   ESP_LOGI(TAG, "IP Camera Viewer initialized");
+}
+
+// Tâche FreeRTOS dédiée : fetch RTP + décodage edge264 + conversion YUV->RGB565,
+// EN FOND. Le loopTask ne fait plus que l'affichage (voir lvgl_timer_callback_).
+// Aucun appel LVGL ici (LVGL n'est pas thread-safe). Non surveillée par le Task
+// WDT : une I-frame de ~11 s ne provoque donc pas de reboot.
+void IPCameraViewer::decode_task_fn_(void *arg) {
+  IPCameraViewer *cam = static_cast<IPCameraViewer *>(arg);
+  for (;;) {
+    // Inactif tant que le flux n'est pas prêt, ou si une frame déjà décodée n'a pas
+    // encore été affichée (handshake : on n'écrase pas current_decode_buffer_).
+    if (!cam->enabled_ || !cam->stream_connected_ || cam->protocol_ == Protocol::MJPEG ||
+        cam->rgb565_buffer_a_ == nullptr || cam->yuv_buffer_ == nullptr ||
+        cam->decode_frame_ready_.load(std::memory_order_acquire)) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+#ifdef USE_H264_HP_EDGE264
+    bool got = false;
+    if (cam->fetch_rtp_frame_()) {
+      if (cam->decode_h264_to_yuv_()) {
+        cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
+                                       cam->width_, cam->height_);
+        got = true;
+      }
+    }
+    if (got) {
+      // Release : la frame convertie dans current_decode_buffer_ est visible pour le
+      // loopTask qui la lira après avoir vu decode_frame_ready_ == true.
+      cam->decode_frame_ready_.store(true, std::memory_order_release);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(3));
+    }
+#else
+    vTaskDelay(pdMS_TO_TICKS(50));
+#endif
+  }
 }
 
 void IPCameraViewer::loop() {
@@ -155,18 +212,25 @@ void IPCameraViewer::loop() {
     lv_timer_del(this->lvgl_timer_);
     this->lvgl_timer_ = nullptr;
 
-    if (this->protocol_ == Protocol::MJPEG) {
-      this->disconnect_mjpeg_stream_();
+    if (this->decode_task_handle_ != nullptr) {
+      // Une tâche de décodage tourne en fond et peut être EN TRAIN d'utiliser les
+      // buffers/le socket (décodage d'une I-frame ~11 s). Déconnecter ou libérer ici
+      // = use-after-free. On se contente de mettre en pause : enabled_ est déjà false,
+      // donc la tâche s'arrête de fetcher/décoder à sa prochaine itération (TCP
+      // backpressure met le flux caméra en pause). Buffers/connexion conservés ;
+      // tout reprend proprement à la réactivation.
+      ESP_LOGI(TAG, "IP Camera Viewer en pause (tâche de décodage active — buffers conservés)");
     } else {
-      this->disconnect_rtsp_stream_();
+      if (this->protocol_ == Protocol::MJPEG) {
+        this->disconnect_mjpeg_stream_();
+      } else {
+        this->disconnect_rtsp_stream_();
+      }
+      // CRITICAL: Free PSRAM buffers when camera is disabled to prevent memory overflow
+      ESP_LOGI(TAG, "Freeing PSRAM buffers...");
+      this->free_buffers_();
+      ESP_LOGI(TAG, "IP Camera Viewer display stopped and buffers freed");
     }
-
-    // CRITICAL: Free PSRAM buffers when camera is disabled to prevent memory overflow
-    // This releases ~1.5MB of PSRAM (RGB565 buffers + JPEG buffer + parse buffer)
-    ESP_LOGI(TAG, "Freeing PSRAM buffers...");
-    this->free_buffers_();
-
-    ESP_LOGI(TAG, "IP Camera Viewer display stopped and buffers freed");
   }
 }
 
@@ -249,11 +313,21 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
       frame_ready = cam->decode_jpeg_to_rgb565_();
     }
   } else {
-    if (cam->fetch_rtp_frame_()) {
-      if (cam->decode_h264_to_yuv_()) {
-        cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
-                                       cam->width_, cam->height_);
-        frame_ready = true;
+    // H.264 : si la tâche de décodage dédiée existe, le décodage (fetch RTP + edge264
+    // + conversion) tourne EN FOND sur decode_task_fn_. Ici, sur le loopTask, on ne
+    // fait QUE récupérer une frame déjà prête -> LVGL/tactile/audio ne gèlent plus,
+    // même pendant les ~11 s d'une I-frame. Repli sur décodage en ligne si la tâche
+    // n'a pas pu être créée (mémoire).
+    if (cam->decode_task_handle_ != nullptr) {
+      // acquire : si true, les écritures du buffer par la tâche sont visibles ici.
+      frame_ready = cam->decode_frame_ready_.load(std::memory_order_acquire);
+    } else {
+      if (cam->fetch_rtp_frame_()) {
+        if (cam->decode_h264_to_yuv_()) {
+          cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
+                                         cam->width_, cam->height_);
+          frame_ready = true;
+        }
       }
     }
   }
@@ -261,6 +335,10 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
   if (frame_ready) {
     cam->update_canvas_();
     cam->swap_buffers_();
+    // Handshake avec la tâche de décodage : on a consommé la frame -> elle peut
+    // préparer la suivante dans le buffer maintenant libre (post-swap).
+    if (cam->decode_task_handle_ != nullptr && cam->protocol_ != Protocol::MJPEG)
+      cam->decode_frame_ready_.store(false, std::memory_order_release);
     cam->frame_count_++;
 
     // Log FPS every 100 frames

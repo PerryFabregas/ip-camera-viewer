@@ -20,6 +20,10 @@ extern "C" {
 
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <atomic>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 namespace esphome {
 namespace ip_camera_viewer {
@@ -93,6 +97,21 @@ class IPCameraViewer : public Component {
   uint8_t *current_display_buffer_{nullptr};
   uint8_t *current_decode_buffer_{nullptr};
   size_t rgb565_buffer_size_{0};
+
+  // --- Décodage H.264 sur tâche dédiée (solution "ne pas bloquer LVGL") ------
+  // Une I-frame edge264 prend ~11 s sur ce P4 (scalaire). Exécutée sur le
+  // loopTask, elle gèle écran/tactile/audio. On la déporte sur une tâche FreeRTOS
+  // dédiée : elle fetch+décode+convertit en fond, et le loopTask ne fait plus que
+  // POSER l'image (canvas), instantané. Handshake par decode_frame_ready_ :
+  // la tâche remplit current_decode_buffer_ puis met ready=true ; le timer affiche,
+  // swappe et remet ready=false ; la tâche peut alors préparer la suivante.
+  // Si la création de la tâche échoue, decode_task_handle_ reste nullptr et on
+  // retombe sur le décodage en ligne (comportement historique).
+  TaskHandle_t decode_task_handle_{nullptr};
+  // Atomique acquire/release : garantit que les écritures du buffer converti par la
+  // tâche sont visibles par le loopTask AVANT qu'il ne voie le flag à true (RISC-V
+  // multicœur = mémoire faiblement ordonnée).
+  std::atomic<bool> decode_frame_ready_{false};
 
   // JPEG receive buffer
   uint8_t *jpeg_buffer_{nullptr};
@@ -199,6 +218,9 @@ class IPCameraViewer : public Component {
   bool fetch_rtp_frame_();
   bool decode_h264_to_yuv_();
   void convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, int width, int height);
+
+  // Boucle de la tâche de décodage dédiée (voir decode_task_handle_).
+  static void decode_task_fn_(void *arg);
 };
 
 }  // namespace ip_camera_viewer
