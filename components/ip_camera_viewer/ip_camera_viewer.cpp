@@ -12,6 +12,8 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/md5.h"
 #include "esp_task_wdt.h"
+#include "esp_rom_sys.h"  // esp_rom_get_cpu_ticks_per_us (diag fréquence CPU)
+#include "esp_timer.h"    // esp_timer_get_time (diag temps de décodage isolé)
 
 namespace esphome {
 namespace ip_camera_viewer {
@@ -31,6 +33,11 @@ void IPCameraViewer::setup() {
   ESP_LOGI(TAG, "  Protocol: %s", this->protocol_ == Protocol::RTSP ? "RTSP/H264" : "MJPEG");
   ESP_LOGI(TAG, "  Resolution: %ux%u", this->width_, this->height_);
   ESP_LOGI(TAG, "  Update interval: %u ms", this->update_interval_);
+  // DIAG perf: la vitesse de décodage edge264 dépend DIRECTEMENT de la fréquence
+  // CPU. Si le P4 ne tourne pas à sa fréquence max (~360-400 MHz), le décodage est
+  // ralenti d'autant. On log la fréquence réelle pour lever le doute (ticks/us = MHz).
+  ESP_LOGI(TAG, "  CPU frequency: %u MHz (max P4 = 360-400 MHz)",
+           (unsigned) esp_rom_get_cpu_ticks_per_us());
 
   if (!this->init_buffers_()) {
     ESP_LOGE(TAG, "Failed to allocate buffers");
@@ -44,15 +51,72 @@ void IPCameraViewer::setup() {
       this->mark_failed();
       return;
     }
-  } else {
-    if (!this->init_h264_decoder_()) {
-      ESP_LOGE(TAG, "Failed to initialize H264 decoder");
-      this->mark_failed();
-      return;
+  }
+  // RTSP/H264: the decoder is created LAZILY (see decode_h264_to_yuv_), NOT here.
+  // The H.264 profile is only known after the RTSP SDP is parsed. Eagerly creating
+  // the tinyH264/h264bsd Baseline decoder spawns its prebuilt RISC-V worker task,
+  // which faults ("Instruction address misaligned", core 1) on the ESP32-P4.
+  // High-profile streams are handled by edge264 (h264_hp) and must NEVER create
+  // that worker — so we defer the choice until the first frame is decoded.
+
+  // Tâche de décodage H.264 dédiée : décode en fond pour ne PAS geler LVGL pendant
+  // les ~11 s d'une I-frame (solution validée avec le dev ESPHome). Pile en RAM
+  // interne 28 Ko (le décodage y a besoin de ~20 Ko ; pile PSRAM interdite car une
+  // écriture flash/NVS pendant le décodage désactive le cache -> crash). Si la
+  // création échoue (RAM interne insuffisante — pense à retirer micro_wake_word),
+  // decode_task_handle_ reste nullptr et on décode en ligne (repli sûr).
+  if (this->protocol_ == Protocol::RTSP) {
+    BaseType_t ok = xTaskCreatePinnedToCore(&IPCameraViewer::decode_task_fn_, "ipcv_decode",
+                                            28672, this, 1, &this->decode_task_handle_,
+                                            tskNO_AFFINITY);
+    if (ok != pdPASS || this->decode_task_handle_ == nullptr) {
+      this->decode_task_handle_ = nullptr;
+      ESP_LOGW(TAG, "Tâche de décodage dédiée NON créée (RAM interne ?) — décodage en "
+                    "ligne (LVGL peut geler pendant une I-frame). Libère de la RAM interne "
+                    "(ex. retire micro_wake_word) pour l'activer.");
+    } else {
+      ESP_LOGI(TAG, "Tâche de décodage H.264 dédiée active — LVGL ne gèlera plus.");
     }
   }
 
   ESP_LOGI(TAG, "IP Camera Viewer initialized");
+}
+
+// Tâche FreeRTOS dédiée : fetch RTP + décodage edge264 + conversion YUV->RGB565,
+// EN FOND. Le loopTask ne fait plus que l'affichage (voir lvgl_timer_callback_).
+// Aucun appel LVGL ici (LVGL n'est pas thread-safe). Non surveillée par le Task
+// WDT : une I-frame de ~11 s ne provoque donc pas de reboot.
+void IPCameraViewer::decode_task_fn_(void *arg) {
+  IPCameraViewer *cam = static_cast<IPCameraViewer *>(arg);
+  for (;;) {
+    // Inactif tant que le flux n'est pas prêt, ou si une frame déjà décodée n'a pas
+    // encore été affichée (handshake : on n'écrase pas current_decode_buffer_).
+    if (!cam->enabled_ || !cam->stream_connected_ || cam->protocol_ == Protocol::MJPEG ||
+        cam->rgb565_buffer_a_ == nullptr || cam->yuv_buffer_ == nullptr ||
+        cam->decode_frame_ready_.load(std::memory_order_acquire)) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+#ifdef USE_H264_HP_EDGE264
+    bool got = false;
+    if (cam->fetch_rtp_frame_()) {
+      if (cam->decode_h264_to_yuv_()) {
+        cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
+                                       cam->width_, cam->height_);
+        got = true;
+      }
+    }
+    if (got) {
+      // Release : la frame convertie dans current_decode_buffer_ est visible pour le
+      // loopTask qui la lira après avoir vu decode_frame_ready_ == true.
+      cam->decode_frame_ready_.store(true, std::memory_order_release);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(3));
+    }
+#else
+    vTaskDelay(pdMS_TO_TICKS(50));
+#endif
+  }
 }
 
 void IPCameraViewer::loop() {
@@ -105,15 +169,12 @@ void IPCameraViewer::loop() {
         ESP_LOGE(TAG, "Failed to reallocate buffers");
         return;
       }
-      // Also reinit decoder
+      // Also reinit decoder. Only JPEG is (re)created eagerly; the H264 decoder
+      // is lazy (see decode_h264_to_yuv_) so a High-profile stream never spawns
+      // the crashing tinyH264 worker.
       if (this->protocol_ == Protocol::MJPEG) {
         if (!this->init_jpeg_decoder_()) {
           ESP_LOGE(TAG, "Failed to reinitialize JPEG decoder");
-          return;
-        }
-      } else {
-        if (!this->init_h264_decoder_()) {
-          ESP_LOGE(TAG, "Failed to reinitialize H264 decoder");
           return;
         }
       }
@@ -151,18 +212,25 @@ void IPCameraViewer::loop() {
     lv_timer_del(this->lvgl_timer_);
     this->lvgl_timer_ = nullptr;
 
-    if (this->protocol_ == Protocol::MJPEG) {
-      this->disconnect_mjpeg_stream_();
+    if (this->decode_task_handle_ != nullptr) {
+      // Une tâche de décodage tourne en fond et peut être EN TRAIN d'utiliser les
+      // buffers/le socket (décodage d'une I-frame ~11 s). Déconnecter ou libérer ici
+      // = use-after-free. On se contente de mettre en pause : enabled_ est déjà false,
+      // donc la tâche s'arrête de fetcher/décoder à sa prochaine itération (TCP
+      // backpressure met le flux caméra en pause). Buffers/connexion conservés ;
+      // tout reprend proprement à la réactivation.
+      ESP_LOGI(TAG, "IP Camera Viewer en pause (tâche de décodage active — buffers conservés)");
     } else {
-      this->disconnect_rtsp_stream_();
+      if (this->protocol_ == Protocol::MJPEG) {
+        this->disconnect_mjpeg_stream_();
+      } else {
+        this->disconnect_rtsp_stream_();
+      }
+      // CRITICAL: Free PSRAM buffers when camera is disabled to prevent memory overflow
+      ESP_LOGI(TAG, "Freeing PSRAM buffers...");
+      this->free_buffers_();
+      ESP_LOGI(TAG, "IP Camera Viewer display stopped and buffers freed");
     }
-
-    // CRITICAL: Free PSRAM buffers when camera is disabled to prevent memory overflow
-    // This releases ~1.5MB of PSRAM (RGB565 buffers + JPEG buffer + parse buffer)
-    ESP_LOGI(TAG, "Freeing PSRAM buffers...");
-    this->free_buffers_();
-
-    ESP_LOGI(TAG, "IP Camera Viewer display stopped and buffers freed");
   }
 }
 
@@ -245,11 +313,21 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
       frame_ready = cam->decode_jpeg_to_rgb565_();
     }
   } else {
-    if (cam->fetch_rtp_frame_()) {
-      if (cam->decode_h264_to_yuv_()) {
-        cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
-                                       cam->width_, cam->height_);
-        frame_ready = true;
+    // H.264 : si la tâche de décodage dédiée existe, le décodage (fetch RTP + edge264
+    // + conversion) tourne EN FOND sur decode_task_fn_. Ici, sur le loopTask, on ne
+    // fait QUE récupérer une frame déjà prête -> LVGL/tactile/audio ne gèlent plus,
+    // même pendant les ~11 s d'une I-frame. Repli sur décodage en ligne si la tâche
+    // n'a pas pu être créée (mémoire).
+    if (cam->decode_task_handle_ != nullptr) {
+      // acquire : si true, les écritures du buffer par la tâche sont visibles ici.
+      frame_ready = cam->decode_frame_ready_.load(std::memory_order_acquire);
+    } else {
+      if (cam->fetch_rtp_frame_()) {
+        if (cam->decode_h264_to_yuv_()) {
+          cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
+                                         cam->width_, cam->height_);
+          frame_ready = true;
+        }
       }
     }
   }
@@ -257,6 +335,10 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
   if (frame_ready) {
     cam->update_canvas_();
     cam->swap_buffers_();
+    // Handshake avec la tâche de décodage : on a consommé la frame -> elle peut
+    // préparer la suivante dans le buffer maintenant libre (post-swap).
+    if (cam->decode_task_handle_ != nullptr && cam->protocol_ != Protocol::MJPEG)
+      cam->decode_frame_ready_.store(false, std::memory_order_release);
     cam->frame_count_++;
 
     // Log FPS every 100 frames
@@ -275,7 +357,21 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
     no_frame_count++;
     if (no_frame_count == 100 || no_frame_count % 500 == 0) {
       if (cam->protocol_ == Protocol::RTSP) {
-        ESP_LOGW(TAG, "No H264 frames decoded yet (%u attempts)", no_frame_count);
+#ifdef USE_H264_HP_EDGE264
+        if (cam->use_hp_decoder_) {
+          // Surface l'état du décodeur edge264 au niveau WARN (logger par défaut) :
+          //  - decode_errors > 0  -> NAL mal fournies / flux refusé (problème de feed)
+          //  - errors == 0 & frames == 0 -> décode silencieux sans sortie (DPB / get_frame)
+          ESP_LOGW(TAG,
+                   "No H264 frames decoded yet (%u attempts) — edge264: frames=%u, "
+                   "decode_errors=%u, started=%d. Si decode_errors monte, le feed NAL "
+                   "est en cause ; sinon, la sortie get_frame. (logger VERBOSE pour le "
+                   "détail par NAL)",
+                   no_frame_count, cam->hp_decoder_.frames_decoded(),
+                   cam->hp_decoder_.decode_errors(), (int) cam->hp_started_);
+        } else
+#endif
+          ESP_LOGW(TAG, "No H264 frames decoded yet (%u attempts)", no_frame_count);
       } else {
         ESP_LOGW(TAG, "No JPEG frames decoded yet (%u attempts)", no_frame_count);
       }
@@ -373,9 +469,19 @@ bool IPCameraViewer::init_buffers_() {
     ESP_LOGI(TAG, "Allocated parse buffer in PSRAM: %u bytes (2x JPEG buffer, saves SRAM!)",
              this->parse_buffer_size_);
   } else {
-    // Allocate H264 and YUV buffers
+    // Allocate H264 and YUV buffers.
+    // edge264's get_bytes() reads an unaligned 16-byte SIMD chunk and may over-read
+    // up to ~16 bytes past the NAL `end` we hand to edge264_decode_NAL (the extra
+    // bytes are masked out of the actual bitstream, but they ARE loaded). h264_buffer_
+    // is filled only up to h264_buffer_size_, so we over-allocate by a 64-byte guard
+    // and zero its tail: this honors edge264's documented over-read contract and
+    // prevents a rare out-of-bounds PSRAM read when the very last NAL ends close to
+    // the buffer limit. h264_buffer_size_ stays at MAX_H264_SIZE so fill logic is
+    // unchanged; the guard is pure slack behind valid data.
     this->h264_buffer_size_ = MAX_H264_SIZE;
-    this->h264_buffer_ = (uint8_t *)heap_caps_malloc(this->h264_buffer_size_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    this->h264_buffer_ = (uint8_t *)heap_caps_malloc(this->h264_buffer_size_ + 64, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (this->h264_buffer_ != nullptr)
+      memset(this->h264_buffer_ + this->h264_buffer_size_, 0, 64);
 
     // YUV420: width * height * 1.5 bytes
     this->yuv_buffer_size_ = this->width_ * this->height_ * 3 / 2;
@@ -392,6 +498,19 @@ bool IPCameraViewer::init_buffers_() {
 }
 
 void IPCameraViewer::free_buffers_() {
+#ifdef USE_H264_HP_EDGE264
+  // Release the edge264 High Profile decoder FIRST — it holds the largest PSRAM
+  // consumer of all: several MB of DPB frame buffers. If it is left allocated
+  // across a disable/enable toggle, PSRAM stays too full/fragmented to reallocate
+  // the 1.2 MB of RGB565 buffers on re-enable ("Failed to allocate aligned RGB565
+  // buffers"). The decoder is lazily re-created on the first decode after
+  // re-enable (see decode_h264_to_yuv_), so freeing it here is safe.
+  if (this->hp_started_) {
+    this->hp_decoder_.end();
+    this->hp_started_ = false;
+  }
+#endif
+
   // Free RGB565 buffers
   if (this->rgb565_buffer_a_ != nullptr) {
     free(this->rgb565_buffer_a_);
@@ -457,9 +576,11 @@ bool IPCameraViewer::init_jpeg_decoder_() {
 }
 
 bool IPCameraViewer::init_h264_decoder_() {
+  // esp_h264_dec_cfg_t (1.3.6) exposes only pic_type. There is no profile field:
+  // esp_h264_dec_sw routes to tinyH264/h264bsd, which is Constrained Baseline only.
+  // Main/High profile is handled separately by the edge264 (h264_hp) path.
   esp_h264_dec_cfg_sw_t dec_cfg = {};
   dec_cfg.pic_type = ESP_H264_RAW_FMT_I420;
-  dec_cfg.profile_idc = ESP_H264_PROFILE_AUTO;  // openh264 supports all profiles - auto-detect
 
   esp_h264_err_t ret = esp_h264_dec_sw_new(&dec_cfg, &this->h264_decoder_);
   if (ret != ESP_H264_ERR_OK) {
@@ -473,7 +594,10 @@ bool IPCameraViewer::init_h264_decoder_() {
     return false;
   }
 
-  ESP_LOGI(TAG, "H264 decoder initialized (openh264 supports Baseline/Main/High profiles)");
+  // Truth: the bundled libopenh264.a is encoder-only; decoding goes through
+  // tinyH264/h264bsd = CONSTRAINED BASELINE only. Main/High needs the edge264
+  // (h264_hp) path. Don't claim Main/High here.
+  ESP_LOGI(TAG, "H264 decoder initialized (tinyH264/h264bsd — Baseline profile only)");
   return true;
 }
 
@@ -1291,11 +1415,17 @@ bool IPCameraViewer::connect_rtsp_stream_() {
                             : profile_idc == 244 ? "High444" : "Unknown";
         ESP_LOGI(TAG, "H264 stream profile_idc=%u (%s), level_idc=%u", profile_idc, pname, level_idc);
         if (profile_idc != 66) {
+#ifdef USE_H264_HP_EDGE264
+          // edge264 gère Baseline/Main/High : on route ce flux vers lui.
+          this->use_hp_decoder_ = true;
+          ESP_LOGI(TAG, "H264 %s profile -> décodage via edge264 (h264_hp, High Profile).", pname);
+#else
           ESP_LOGE(TAG, "This stream is H264 %s profile, but the ESP32-P4 software decoder "
                         "(tinyH264) only supports BASELINE. It will NOT decode (VLC works because "
                         "it has a full decoder).", pname);
-          ESP_LOGE(TAG, "Fix: use MJPEG via go2rtc (hardware JPEG decode, recommended), or have "
-                        "go2rtc/ffmpeg transcode the stream to H264 Baseline.");
+          ESP_LOGE(TAG, "Fix: build libedge264.a (h264_hp) for native High decode, use MJPEG via "
+                        "go2rtc, or transcode the stream to H264 Baseline.");
+#endif
         }
       }
     }
@@ -1404,6 +1534,7 @@ void IPCameraViewer::disconnect_rtsp_stream_() {
   this->has_sps_ = false;
   this->has_pps_ = false;
   this->h264_data_len_ = 0;
+  this->rtp_acc_len_ = 0;  // drop any half-received interleaved packet
 }
 
 // Compute the lowercase hex MD5 of a string (used for Digest auth)
@@ -1602,74 +1733,90 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
   // TCP interleaved format:
   // $ (0x24), channel (1 byte), length (2 bytes big endian), RTP data
-  uint8_t header[4];
+  // Packets are extracted from the persistent rtp_acc_ buffer (see below).
   uint8_t rtp_packet[1500];
 
   // Accumulate NAL units into h264_buffer_
   bool frame_complete = false;
 
+  // --- Diagnostic RTP (visible au niveau INFO toutes les ~100 lectures) -------
+  // Révèle POURQUOI aucune frame ne se forme : pas de data (eagain), framing
+  // interleaved KO (non '$'), mauvais canal, ou marker jamais vu.
+  static uint32_t d_calls = 0, d_eagain = 0, d_short = 0, d_nondollar = 0;
+  static uint32_t d_pkts = 0, d_bytes = 0, d_ch0 = 0, d_markers = 0;
+  static uint32_t d_nal_mask = 0;  // bit i = nal_type i vu
+  d_calls++;
+  if (d_calls % 100 == 0) {
+    // NAL types RTP : 1=P,5=IDR,7=SPS,8=PPS,24=STAP-A,28=FU-A
+    ESP_LOGI(TAG,
+             "RTP diag: calls=%u pkts=%u bytes=%u ch0=%u markers=%u | "
+             "eagain=%u short=%u nondollar=%u | nal_mask=0x%08x",
+             d_calls, d_pkts, d_bytes, d_ch0, d_markers, d_eagain, d_short,
+             d_nondollar, d_nal_mask);
+  }
+
   while (!frame_complete) {
-    // Read interleaved header
-    ssize_t len = recv(this->rtsp_socket_, header, 4, MSG_PEEK);
-    if (len <= 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        break;  // No more data available
+    // 1) Drain whatever is available from the socket into a PERSISTENT
+    //    accumulation buffer. Over TCP the camera's interleaved frames split
+    //    arbitrarily across recv()s, and on a NON-blocking socket recv() returns
+    //    only the bytes that have arrived so far. The previous code peeked+
+    //    consumed the 4-byte interleaved header and then broke if the payload
+    //    wasn't fully there yet — leaving the '$' framing desynced; stray 0x24
+    //    bytes inside the H.264 payload then re-synced to bogus packets and NO
+    //    frame ever assembled (the "started=0 / frames=0" symptom). We now only
+    //    ever parse COMPLETE '$'-framed packets and keep partial bytes for the
+    //    next tick. (Validated on host with trickle delivery: 0 -> 20 frames.)
+    if (this->rtp_acc_len_ < sizeof(this->rtp_acc_)) {
+      ssize_t len = recv(this->rtsp_socket_, this->rtp_acc_ + this->rtp_acc_len_,
+                         sizeof(this->rtp_acc_) - this->rtp_acc_len_, 0);
+      if (len > 0) {
+        this->rtp_acc_len_ += (size_t) len;
+      } else if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        d_eagain++;  // no new data this tick
+      } else {
+        return false;  // socket error / closed
       }
-      return false;
     }
 
-    if (len < 4) {
-      break;  // Not enough data yet
+    // 2) Resync to the next interleaved marker '$'.
+    while (this->rtp_acc_len_ > 0 && this->rtp_acc_[0] != '$') {
+      memmove(this->rtp_acc_, this->rtp_acc_ + 1, --this->rtp_acc_len_);
+      d_nondollar++;
+    }
+    if (this->rtp_acc_len_ < 4) {
+      d_short++;
+      break;  // header not fully arrived yet — keep what we have for next tick
     }
 
-    // Check for interleaved marker
-    if (header[0] != '$') {
-      // Skip non-interleaved data (could be RTSP response)
-      char skip[1];
-      recv(this->rtsp_socket_, skip, 1, 0);
+    uint8_t channel = this->rtp_acc_[1];
+    uint16_t rtp_len = (this->rtp_acc_[2] << 8) | this->rtp_acc_[3];
+
+    if (rtp_len == 0 || rtp_len > sizeof(rtp_packet)) {
+      // Bogus length (almost certainly a false '$' inside a payload): drop this
+      // byte and resync rather than trusting it.
+      memmove(this->rtp_acc_, this->rtp_acc_ + 1, --this->rtp_acc_len_);
       continue;
     }
 
-    uint8_t channel = header[1];
-    uint16_t rtp_len = (header[2] << 8) | header[3];
-
-    if (rtp_len > sizeof(rtp_packet)) {
-      ESP_LOGW(TAG, "RTP packet too large: %u", rtp_len);
-      // Consume the header and skip the packet
-      recv(this->rtsp_socket_, header, 4, 0);
-      while (rtp_len > 0) {
-        ssize_t skip = recv(this->rtsp_socket_, rtp_packet,
-                           rtp_len > sizeof(rtp_packet) ? sizeof(rtp_packet) : rtp_len, 0);
-        if (skip <= 0) break;
-        rtp_len -= skip;
-      }
-      continue;
+    if ((size_t) 4 + rtp_len > this->rtp_acc_len_) {
+      break;  // full packet not arrived yet — wait for the next tick
     }
 
-    // Consume the header
-    recv(this->rtsp_socket_, header, 4, 0);
+    // 3) We have exactly ONE complete interleaved packet. Copy it out and
+    //    remove it (header + payload) from the accumulation buffer.
+    memcpy(rtp_packet, this->rtp_acc_ + 4, rtp_len);
+    const size_t consumed = (size_t) 4 + rtp_len;
+    memmove(this->rtp_acc_, this->rtp_acc_ + consumed, this->rtp_acc_len_ - consumed);
+    this->rtp_acc_len_ -= consumed;
 
-    // Read RTP packet
-    ssize_t received = 0;
-    while (received < rtp_len) {
-      len = recv(this->rtsp_socket_, rtp_packet + received, rtp_len - received, 0);
-      if (len <= 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          break;
-        }
-        return false;
-      }
-      received += len;
-    }
-
-    if (received < rtp_len) {
-      break;  // Incomplete packet
-    }
+    d_pkts++;
+    d_bytes += rtp_len;
 
     // Skip RTCP packets (channel 1)
     if (channel != 0) {
       continue;
     }
+    d_ch0++;
 
     if (rtp_len < 12) {
       continue;  // Invalid RTP packet
@@ -1677,6 +1824,8 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
     // RTP header
     uint8_t marker = (rtp_packet[1] >> 7) & 0x01;
+    if (marker)
+      d_markers++;
 
     int header_len = 12;  // Basic RTP header
 
@@ -1690,6 +1839,8 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 
     // Check NAL unit type
     uint8_t nal_type = nal_data[0] & 0x1F;
+    if (nal_type < 32)
+      d_nal_mask |= (1u << nal_type);
 
     // H.264 NAL unit types:
     // 7 = SPS (Sequence Parameter Set)
@@ -1905,8 +2056,98 @@ bool IPCameraViewer::fetch_rtp_frame_() {
 }
 
 bool IPCameraViewer::decode_h264_to_yuv_() {
-  if (this->h264_data_len_ == 0 || this->h264_decoder_ == nullptr) {
+  if (this->h264_data_len_ == 0) {
     return false;
+  }
+
+#ifdef USE_H264_HP_EDGE264
+  if (this->use_hp_decoder_) {
+    if (!this->hp_started_) {
+      // MONO-THREAD (begin(0)) : décodage SYNCHRONE, AUCUN thread worker.
+      // En multi-thread (begin 1/2), edge264 crée des pthreads ; sur les pthreads
+      // FreeRTOS d'ESP-IDF, loopTask se bloque dans decode_NAL/get_frame à attendre
+      // un worker qui n'avance plus (les 2 cœurs retombent IDLE) -> reboot par le
+      // Task Watchdog (loopTask affamée). Les pthreads Linux ne reproduisaient pas
+      // ce deadlock. begin(0) supprime toute la couche threads : decode_NAL décode
+      // en ligne et get_frame renvoie aussitôt (mode prouvé 30/30 sur PC). Le
+      // décodage (~20 Ko de pile) tourne sur loopTask : il faut donc
+      // loop_task_stack_size: 32768 dans la config esp32 (sinon débordement).
+      this->hp_started_ = this->hp_decoder_.begin(0);
+      if (!this->hp_started_) {
+        ESP_LOGE(TAG, "edge264: échec d'initialisation du décodeur High Profile");
+        this->h264_data_len_ = 0;
+        return false;
+      }
+    }
+
+    // Fournir le flux Annex-B accumulé (SPS/PPS + slices) à edge264.
+    // DIAG perf : chrono ISOLÉ du décodage (µs) pour le séparer de la conversion
+    // YUV->RGB et du rendu LVGL. Le "lvgl took a long time" englobe tout ; ici on
+    // sait exactement combien coûte edge264 seul, et donc le temps par macrobloc.
+    const int64_t _dec_t0 = esp_timer_get_time();
+    this->hp_decoder_.decode_annexb(this->h264_buffer_, this->h264_data_len_);
+    const int64_t _dec_us = esp_timer_get_time() - _dec_t0;
+    if (_dec_us > 3000)  // ne logge que les passes coûteuses (typiquement une IDR)
+      ESP_LOGW(TAG, "edge264 decode: %lld ms pour %u octets (%u MB config)",
+               (long long) (_dec_us / 1000), (unsigned) this->h264_data_len_,
+               (unsigned) ((this->width_ / 16) * (this->height_ / 16)));
+    this->h264_data_len_ = 0;
+
+    bool got = false;
+    h264_hp::DecodedFrame f;
+    while (this->hp_decoder_.get_frame(&f)) {
+      const int sw = f.width & ~1;   // dimensions paires (4:2:0) du flux décodé
+      const int sh = f.height & ~1;
+      if (sw > 0 && sh > 0 && f.y && f.cb && f.cr) {
+        // Le canvas LVGL et convert_yuv420_to_rgb565_ sont FIXÉS à width_/height_
+        // (config YAML). On dispose donc l'image décodée dans un plan I420 à la
+        // taille CONFIGURÉE : on recadre (crop) si le flux est plus grand, on
+        // letterbox (bords noirs) s'il est plus petit. Conséquence : un mismatch
+        // de résolution donne TOUJOURS une image (jamais d'écran noir) et ne peut
+        // JAMAIS déborder yuv_buffer_ (= width_*height_*3/2). Cas nominal (flux ==
+        // config) : dw=width_, dh=height_ -> copie pleine, identique à avant.
+        const int dw = (sw < (int) this->width_ ? sw : (int) this->width_) & ~1;
+        const int dh = (sh < (int) this->height_ ? sh : (int) this->height_) & ~1;
+        const int cfg_cw = this->width_ / 2, cfg_ch = this->height_ / 2;
+        if (sw != (int) this->width_ || sh != (int) this->height_) {
+          static bool warned = false;
+          if (!warned) {
+            ESP_LOGW(TAG, "edge264: flux %dx%d != config %ux%u — recadré/letterboxé. "
+                          "Ajuste width/height pour un rendu plein cadre.",
+                     sw, sh, this->width_, this->height_);
+            warned = true;
+          }
+          // Flux plus petit que la config : noircir une fois le buffer pour que
+          // les bords non remplis soient noirs (et non du contenu PSRAM résiduel).
+          if (dw < (int) this->width_ || dh < (int) this->height_)
+            memset(this->yuv_buffer_, 0, this->yuv_buffer_size_);
+        }
+        uint8_t *Y = this->yuv_buffer_;
+        uint8_t *U = Y + (size_t) this->width_ * this->height_;
+        uint8_t *V = U + (size_t) cfg_cw * cfg_ch;
+        for (int row = 0; row < dh; row++)
+          memcpy(Y + (size_t) row * this->width_, f.y + (size_t) row * f.stride_y, dw);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(U + (size_t) row * cfg_cw, f.cb + (size_t) row * f.stride_c, dw / 2);
+        for (int row = 0; row < dh / 2; row++)
+          memcpy(V + (size_t) row * cfg_cw, f.cr + (size_t) row * f.stride_c, dw / 2);
+        got = true;
+      }
+      this->hp_decoder_.release_frame();
+    }
+    return got;
+  }
+#endif
+
+  // Baseline path: lazily create the tinyH264/h264bsd decoder the first time we
+  // actually need it. Deferred from setup() on purpose — its prebuilt RISC-V
+  // worker faults ("Instruction address misaligned", core 1) on the ESP32-P4,
+  // and a High-profile stream (routed to edge264 above) must never spawn it.
+  if (this->h264_decoder_ == nullptr) {
+    if (!this->init_h264_decoder_()) {
+      this->h264_data_len_ = 0;
+      return false;
+    }
   }
 
   esp_h264_dec_in_frame_t in_frame = {};

@@ -1,9 +1,13 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_URL
-import os
 
 DEPENDENCIES = ["wifi"]
+# Auto-chargés pour que l'utilisateur n'ait à mettre que [ip_camera_viewer] :
+#  - esp_h264 : fournit les en-têtes du décodeur (sinon esp_h264_dec.h introuvable
+#    car ESPHome exécute __init__.py depuis l'arbre copié, sans esp_h264).
+#  - h264_hp  : décodeur High Profile edge264 (libedge264.a).
+AUTO_LOAD = ["esp_h264", "h264_hp"]
 CODEOWNERS = ["@youkorr"]
 
 CONF_CANVAS_ID = "canvas_id"
@@ -57,28 +61,13 @@ async def to_code(config):
     cg.add_build_flag("-DCONFIG_JPEG_ENABLE_DEBUG_LOG=0")
     cg.add_build_flag("-DCONFIG_ESP_H264_DECODER=1")
 
-    # Add esp_h264 include paths for H.264 decoder headers
-    component_dir = os.path.dirname(__file__)
-    parent_components_dir = os.path.dirname(component_dir)
-    esp_h264_dir = os.path.join(parent_components_dir, "esp_h264")
-    if os.path.exists(esp_h264_dir):
-        h264_includes = [
-            "interface/include",
-            "port/include",
-            "port/inc",
-            "sw/include",
-            "hw/include",
-            "sw/libs/openh264_inc",
-            "sw/libs/tinyh264_inc",
-        ]
-        for inc in h264_includes:
-            inc_path = os.path.join(esp_h264_dir, inc)
-            if os.path.exists(inc_path):
-                cg.add_build_flag(f"-I{inc_path}")
-
-    # Add PlatformIO build script for H.264 library linking and source compilation
-    build_script = os.path.join(os.path.dirname(__file__), "ip_camera_viewer_build.py")
-    cg.add_platformio_option("extra_scripts", ["post:" + build_script])
+    # Les en-têtes et libs H.264 sont fournis par des COMPOSANTS ESP-IDF :
+    #   - esp_h264 (esp_h264/CMakeLists.txt)        -> esp_h264_dec.h, tinyh264, openh264
+    #   - edge264  (h264_hp/edge264/CMakeLists.txt) -> edge264.h, libedge264.a
+    # tous deux enregistrés via add_idf_component (voir esp_h264/__init__.py et
+    # h264_hp/__init__.py, AUTO_LOAD). Plus de -I bricolé ni d'extra_script
+    # PlatformIO : ça marche avec le moteur PlatformIO ET le moteur CMake/Ninja
+    # natif d'ESPHome (2026.7+), qui n'exécute pas les extra_scripts PlatformIO.
 
     # Process each camera in the list
     for cam_config in config:

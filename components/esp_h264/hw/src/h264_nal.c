@@ -1,9 +1,12 @@
 /*
- * SPDX-FileCopyrightText: 2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2024-2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <string.h>
+#include "soc/soc_caps.h"
+#include "esp_h264_efuse.h"
 #include "h264_nal.h"
 
 #define LOG_MAX_FRAME_NUM 8
@@ -128,7 +131,7 @@ static int nal_bs_size(bs_t *b)
     return bits_len;
 }
 
-uint16_t esp_h264_enc_set_sps(uint8_t *buffer, uint16_t len, uint16_t height, uint16_t width, uint8_t fps, uint8_t profile_idc)
+uint16_t esp_h264_enc_set_sps(uint8_t *buffer, uint16_t len, uint16_t height, uint16_t width, uint8_t fps)
 {
     uint32_t *start_code = (uint32_t *)buffer;
     start_code[0] = 0x01000000;
@@ -142,17 +145,13 @@ uint16_t esp_h264_enc_set_sps(uint8_t *buffer, uint16_t len, uint16_t height, ui
     uint8_t forbidden_zero_bit = 0;
     uint8_t nal_ref_idc = 3;
     uint8_t nal_unit_type = 7;
-    /* profile_idc is now a parameter - default to Baseline (66) if not specified (0) */
-    if (profile_idc == 0) {
-        profile_idc = 66;  /* Default to Baseline profile */
-    }
-    /* Constraint flags vary by profile - set defaults based on profile_idc */
-    uint8_t constraint_set0_flag = (profile_idc == 66) ? 1 : 0;  /* Baseline constraint */
-    uint8_t constraint_set1_flag = (profile_idc <= 77) ? 1 : 0;  /* Main constraint */
-    uint8_t constraint_set2_flag = 0;  /* Extended constraint */
-    uint8_t constraint_set3_flag = 0;  /* Level 1b constraint */
-    uint8_t constraint_set4_flag = 0;  /* Reserved */
-    uint8_t constraint_set5_flag = 0;  /* Reserved */
+    uint8_t profile_idc = 66;
+    uint8_t constraint_set0_flag = 1;
+    uint8_t constraint_set1_flag = 1;
+    uint8_t constraint_set2_flag = 0;
+    uint8_t constraint_set3_flag = 0;
+    uint8_t constraint_set4_flag = 0;
+    uint8_t constraint_set5_flag = 0;
     uint8_t reserved_zero_2bits = 0;
     uint8_t level_idc = level_idcl(width, height, fps);
     uint8_t seq_parameter_set_id = 0;
@@ -323,5 +322,29 @@ uint16_t esp_h264_enc_hw_set_slice(uint8_t *buffer, uint32_t len, bool is_iframe
         }
     }
     uint16_t nal_size = nal_bs_size(&bs) + 32;
+    /*
+     * Flash encryption on, 16-byte phase: when the byte offset implied by (nal_size >> 3) has
+     * (offset % 16) >= 8, prepend an AUD (NAL type 9) before the slice RBSP (starts at buffer+4
+     * after the slice start-code word) so CABAC/DMA sees an 8-byte shifted layout. nal_size += 64
+     * is eight extra bytes in bits, same length accounting style as the +32 reserve elsewhere.
+     */
+#if SOC_PSRAM_DMA_CAPABLE || SOC_DMA_CAN_ACCESS_FLASH
+    if (ESP_H264_IS_FLASH_ENCRYPTION_ENABLED()) {
+        int32_t nal_bytes = nal_size >> 3;
+        uint32_t buffer_copy = (uint32_t)(buffer + nal_bytes);
+        buffer_copy &= 0xf;
+        if (buffer_copy >= 0x8) {
+            static const uint8_t aud_nalu_8B[] = {
+                0x09,                    /* nal header (AUD) */
+                0xF0,                    /* primary_pic_type + RBSP trailing */
+                0x00, 0x00,              /* padding */
+                0x00, 0x00, 0x00, 0x01,  /* start code for next NAL (slice) */
+            };
+            memcpy(buffer + 12, buffer + 4, nal_bytes + 1);
+            memcpy(buffer + 4, aud_nalu_8B, 8);
+            nal_size += 64;
+        }
+    }
+#endif
     return nal_size;
 }
