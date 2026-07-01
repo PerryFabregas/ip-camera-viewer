@@ -1134,7 +1134,8 @@ static void noinline decode_inter(Edge264Context *ctx, int i, int w, int h) {
 	}
 	
 	// prediction coeffs {wY, oY, logWD_Y, logWD_C, wCb, wCr, oCb, oCr}
-	i16x8 wod = {pack_w(0, 1), 0, 0, 0, pack_w(0, 1), pack_w(0, 1), 0, 0}; // no_weight
+	const i16x8 no_weight = {pack_w(0, 1), 0, 0, 0, pack_w(0, 1), pack_w(0, 1), 0, 0};
+	i16x8 wod = no_weight;
 	int refIdx = mb->refIdx[i8x8];
 	int refIdxX = mb->refIdx[i8x8 ^ 4];
 	if (ctx->t.pps.weighted_bipred_idc != 1) {
@@ -1230,18 +1231,43 @@ static void noinline decode_inter(Edge264Context *ctx, int i, int w, int h) {
 		src_C = ctx->edge_buf + 672;
 	}
 	
+	// Full-pel unweighted fast paths. With zero motion fractions the
+	// interpolators are identities, and with default weights (w=1, o=0,
+	// logWD=0) the weighting stage is an identity too: the prediction reduces
+	// to plain row copies, bit-exact with the generic kernels below. This is
+	// the dominant case on static surveillance scenes (P_Skip with uniform
+	// integer motion) and a decisive win on SIMD-less ISAs (RISC-V) where the
+	// scalarized bilinear/6-tap machinery costs thousands of ops per block.
+	i64x2 weq = (i64x2)(wod == no_weight);
+	int unweighted = (weq[0] & weq[1]) == -1;
+
 	// chroma prediction comes first since it can be inlined
 	uint8_t *dst_C = ctx->samples_mb[1] + (y444[i4x4] >> 1) * ctx->t.stride[1] + (x444[i4x4] >> 1);
 	size_t dstride_C = ctx->t.stride[1] >> 1;
 	int xFrac_C = x & 7;
 	int yFrac_C = y & 7;
-	i32x4 ABCD = {little_endian32(((8 - xFrac_C) | xFrac_C << 8) * ((8 - yFrac_C) | yFrac_C << 16))};
-	decode_inter_chroma(w, h, sstride_C, src_C, dstride_C, dst_C, ABCD, wod);
-	
+	if (unweighted && (xFrac_C | yFrac_C) == 0) {
+		// h interleaved Cb/Cr rows of w/2 bytes each (same layout as the kernel)
+		const uint8_t *s = src_C;
+		uint8_t *d = dst_C;
+		for (int r = 0; r < h; r++, s += sstride_C, d += dstride_C)
+			memcpy(d, s, (size_t)(w >> 1));
+	} else {
+		i32x4 ABCD = {little_endian32(((8 - xFrac_C) | xFrac_C << 8) * ((8 - yFrac_C) | yFrac_C << 16))};
+		decode_inter_chroma(w, h, sstride_C, src_C, dstride_C, dst_C, ABCD, wod);
+	}
+
 	// tail jump to luma prediction
 	int xFrac_Y = x & 3;
 	int yFrac_Y = y & 3;
 	size_t dstride_Y = ctx->t.stride[0];
 	uint8_t *dst_Y = ctx->samples_mb[0] + y444[i4x4] * dstride_Y + x444[i4x4];
+	if (unweighted && (xFrac_Y | yFrac_Y) == 0) {
+		const uint8_t *s = src_Y;
+		uint8_t *d = dst_Y;
+		for (int r = 0; r < h; r++, s += sstride_Y, d += dstride_Y)
+			memcpy(d, s, (size_t)w);
+		return;
+	}
 	decode_inter_luma((w << 1 & 48) + yFrac_Y * 4 + xFrac_Y, h, sstride_Y, src_Y, dstride_Y, dst_Y, wod);
 }

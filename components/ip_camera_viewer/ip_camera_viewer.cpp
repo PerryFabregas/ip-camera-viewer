@@ -332,7 +332,13 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
     }
   }
 
+  // Compteur de ticks SANS nouvelle frame. Remis à zéro dès qu'une frame passe :
+  // l'ancien compteur cumulatif ne se réinitialisait jamais et continuait de
+  // logguer "No H264 frames decoded yet" alors que des frames s'affichaient.
+  static uint32_t no_frame_count = 0;
+
   if (frame_ready) {
+    no_frame_count = 0;
     cam->update_canvas_();
     cam->swap_buffers_();
     // Handshake avec la tâche de décodage : on a consommé la frame -> elle peut
@@ -352,8 +358,8 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
       last_time = now;
     }
   } else {
-    // Debug: Log when no frame is ready (only every 100 attempts)
-    static uint32_t no_frame_count = 0;
+    // Debug: log when no NEW frame has been ready for a while (counter resets
+    // on every displayed frame, so this only fires on a genuine stall)
     no_frame_count++;
     if (no_frame_count == 100 || no_frame_count % 500 == 0) {
       if (cam->protocol_ == Protocol::RTSP) {
@@ -362,18 +368,21 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
           // Surface l'état du décodeur edge264 au niveau WARN (logger par défaut) :
           //  - decode_errors > 0  -> NAL mal fournies / flux refusé (problème de feed)
           //  - errors == 0 & frames == 0 -> décode silencieux sans sortie (DPB / get_frame)
+          //  - frames > 0 & displayed > 0 -> simple attente (décodage lent, ex. IDR)
           ESP_LOGW(TAG,
-                   "No H264 frames decoded yet (%u attempts) — edge264: frames=%u, "
-                   "decode_errors=%u, started=%d. Si decode_errors monte, le feed NAL "
-                   "est en cause ; sinon, la sortie get_frame. (logger VERBOSE pour le "
-                   "détail par NAL)",
-                   no_frame_count, cam->hp_decoder_.frames_decoded(),
+                   "Pas de NOUVELLE frame H264 depuis %u ticks — affichées=%u, edge264: "
+                   "frames=%u, decode_errors=%u, started=%d. decode_errors qui monte -> "
+                   "feed NAL en cause ; frames=0 -> sortie get_frame ; sinon décodage "
+                   "lent (IDR en cours). (logger VERBOSE pour le détail par NAL)",
+                   no_frame_count, cam->frame_count_, cam->hp_decoder_.frames_decoded(),
                    cam->hp_decoder_.decode_errors(), (int) cam->hp_started_);
         } else
 #endif
-          ESP_LOGW(TAG, "No H264 frames decoded yet (%u attempts)", no_frame_count);
+          ESP_LOGW(TAG, "No new H264 frame for %u ticks (displayed=%u)", no_frame_count,
+                   cam->frame_count_);
       } else {
-        ESP_LOGW(TAG, "No JPEG frames decoded yet (%u attempts)", no_frame_count);
+        ESP_LOGW(TAG, "No new JPEG frame for %u ticks (displayed=%u)", no_frame_count,
+                 cam->frame_count_);
       }
     }
   }
