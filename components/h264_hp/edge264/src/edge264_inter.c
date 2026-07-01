@@ -1101,6 +1101,114 @@ static void decode_inter_chroma(int w, int h, size_t sstride, const uint8_t *src
  * | bipred=2 | no_weight  | no_weight    | no_weight  | implicit2    |
  * +----------+------------+--------------+------------+--------------+
  */
+#ifdef __riscv
+/**
+ * Scalar unweighted motion compensation for SIMD-less ISAs (RISC-V).
+ *
+ * The vector kernels above (decode_inter_luma/decode_inter_chroma) are 128-bit
+ * SIMD code that the compiler scalarizes into thousands of ops per block on an
+ * ISA without a vector unit; they dominate P-frame cost as soon as the scene
+ * moves (global motion on PTZ pans). These scalar routines implement the exact
+ * H.264 8.4.2.2.1/8.4.2.2.2 interpolation (6-tap luma halves, quarter-pel
+ * averages, bilinear chroma) for the UNWEIGHTED single-prediction case — the
+ * only one surveillance streams use. Weighted/bidirectional prediction falls
+ * back to the vector kernels (their weighting stage reads back dst). Output is
+ * bit-identical to the vector path (verified against the SSE build).
+ */
+static always_inline int mc_clip255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+static always_inline int mc_tap6(int a, int b, int c, int d, int e, int f) {
+	return (a + f) - 5 * (b + e) + 20 * (c + d);
+}
+static always_inline int mc_halfH(const uint8_t *r, int x) {
+	return mc_clip255((mc_tap6(r[x - 2], r[x - 1], r[x], r[x + 1], r[x + 2], r[x + 3]) + 16) >> 5);
+}
+static always_inline int mc_halfV(const uint8_t *p, ptrdiff_t s) {
+	return mc_clip255((mc_tap6(p[-2 * s], p[-s], p[0], p[s], p[2 * s], p[3 * s]) + 16) >> 5);
+}
+
+static void decode_inter_luma_scalar(int w, int h, size_t sstride, const uint8_t *src,
+                                     size_t dstride, uint8_t *dst, int xFrac, int yFrac) {
+	ptrdiff_t ss = sstride, ds = dstride;
+	if (yFrac == 0) { // a/b/c: horizontal only (full-pel is handled upstream)
+		int xo = (xFrac == 3);
+		for (int y = 0; y < h; y++, src += ss, dst += ds) {
+			for (int x = 0; x < w; x++) {
+				int b = mc_halfH(src, x);
+				dst[x] = (xFrac == 2) ? (uint8_t) b : (uint8_t) ((src[x + xo] + b + 1) >> 1);
+			}
+		}
+	} else if (xFrac == 0) { // d/h/n: vertical only
+		ptrdiff_t yo = (yFrac == 3) ? ss : 0;
+		for (int y = 0; y < h; y++, src += ss, dst += ds) {
+			for (int x = 0; x < w; x++) {
+				int v = mc_halfV(src + x, ss);
+				dst[x] = (yFrac == 2) ? (uint8_t) v : (uint8_t) ((src[x + yo] + v + 1) >> 1);
+			}
+		}
+	} else if (xFrac == 2 || yFrac == 2) {
+		// center positions involving j: unclipped horizontal taps first (rows
+		// y-2..y+h+2), then vertical taps of those, (+512)>>10
+		int32_t tmp[16 + 5][16];
+		const uint8_t *r = src - 2 * ss;
+		for (int y = 0; y < h + 5; y++, r += ss)
+			for (int x = 0; x < w; x++)
+				tmp[y][x] = mc_tap6(r[x - 2], r[x - 1], r[x], r[x + 1], r[x + 2], r[x + 3]);
+		for (int y = 0; y < h; y++, dst += ds, src += ss) {
+			for (int x = 0; x < w; x++) {
+				int j = mc_clip255((mc_tap6(tmp[y][x], tmp[y + 1][x], tmp[y + 2][x],
+				                            tmp[y + 3][x], tmp[y + 4][x], tmp[y + 5][x]) + 512) >> 10);
+				int out;
+				if (xFrac == 2 && yFrac == 2) { // j
+					out = j;
+				} else if (yFrac == 2) { // i/k: avg with halfV at col +(xFrac==3)
+					out = (j + mc_halfV(src + x + (xFrac == 3), ss) + 1) >> 1;
+				} else { // f/q: avg with halfH at row +(yFrac==3), reuse tmp
+					out = (j + mc_clip255((tmp[y + 2 + (yFrac == 3)][x] + 16) >> 5) + 1) >> 1;
+				}
+				dst[x] = (uint8_t) out;
+			}
+		}
+	} else { // e/g/p/r: diagonal quarter = avg(halfH at row+(yF==3), halfV at col+(xF==3))
+		ptrdiff_t yo = (yFrac == 3) ? ss : 0;
+		int xo = (xFrac == 3);
+		for (int y = 0; y < h; y++, src += ss, dst += ds) {
+			for (int x = 0; x < w; x++) {
+				int b = mc_halfH(src + yo, x);
+				int v = mc_halfV(src + x + xo, ss);
+				dst[x] = (uint8_t) ((b + v + 1) >> 1);
+			}
+		}
+	}
+}
+
+// w/h are the LUMA partition dims: the chroma block is (w/2) wide and h
+// interleaved Cb/Cr rows tall; the same-plane neighbour row lies 2*sstride
+// away (same layout as decode_inter_chroma above).
+static void decode_inter_chroma_scalar(int w, int h, size_t sstride, const uint8_t *src,
+                                       size_t dstride, uint8_t *dst, int xFrac, int yFrac) {
+	int A = (8 - xFrac) * (8 - yFrac), B = xFrac * (8 - yFrac);
+	int C = (8 - xFrac) * yFrac, D = xFrac * yFrac;
+	int cw = w >> 1;
+	if (yFrac == 0) {
+		for (int y = 0; y < h; y++, src += sstride, dst += dstride)
+			for (int x = 0; x < cw; x++)
+				dst[x] = (uint8_t) ((A * src[x] + B * src[x + 1] + 32) >> 6);
+	} else if (xFrac == 0) {
+		for (int y = 0; y < h; y++, src += sstride, dst += dstride) {
+			const uint8_t *s2 = src + 2 * sstride;
+			for (int x = 0; x < cw; x++)
+				dst[x] = (uint8_t) ((A * src[x] + C * s2[x] + 32) >> 6);
+		}
+	} else {
+		for (int y = 0; y < h; y++, src += sstride, dst += dstride) {
+			const uint8_t *s2 = src + 2 * sstride;
+			for (int x = 0; x < cw; x++)
+				dst[x] = (uint8_t) ((A * src[x] + B * src[x + 1] + C * s2[x] + D * s2[x + 1] + 32) >> 6);
+		}
+	}
+}
+#endif // __riscv
+
 static void noinline decode_inter(Edge264Context *ctx, int i, int w, int h) {
 	static int8_t shift_Y_8bit[46] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15};
 	static int8_t shift_C_8bit[22] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7};
@@ -1252,7 +1360,14 @@ static void noinline decode_inter(Edge264Context *ctx, int i, int w, int h) {
 		uint8_t *d = dst_C;
 		for (int r = 0; r < h; r++, s += sstride_C, d += dstride_C)
 			memcpy(d, s, (size_t)(w >> 1));
-	} else {
+	}
+#ifdef __riscv
+	else if (unweighted) {
+		// fractional unweighted: scalar bilinear beats the scalarized vector kernel
+		decode_inter_chroma_scalar(w, h, sstride_C, src_C, dstride_C, dst_C, xFrac_C, yFrac_C);
+	}
+#endif
+	else {
 		i32x4 ABCD = {little_endian32(((8 - xFrac_C) | xFrac_C << 8) * ((8 - yFrac_C) | yFrac_C << 16))};
 		decode_inter_chroma(w, h, sstride_C, src_C, dstride_C, dst_C, ABCD, wod);
 	}
@@ -1269,5 +1384,12 @@ static void noinline decode_inter(Edge264Context *ctx, int i, int w, int h) {
 			memcpy(d, s, (size_t)w);
 		return;
 	}
+#ifdef __riscv
+	if (unweighted) {
+		// fractional unweighted: scalar 6-tap beats the scalarized vector kernel
+		decode_inter_luma_scalar(w, h, sstride_Y, src_Y, dstride_Y, dst_Y, xFrac_Y, yFrac_Y);
+		return;
+	}
+#endif
 	decode_inter_luma((w << 1 & 48) + yFrac_Y * 4 + xFrac_Y, h, sstride_Y, src_Y, dstride_Y, dst_Y, wod);
 }
