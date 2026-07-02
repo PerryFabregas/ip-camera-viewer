@@ -1,0 +1,638 @@
+From b019fa64cf122788f874dc9a511ce50ac77e9934 Mon Sep 17 00:00:00 2001
+From: youkorr <96953496+youkorr@users.noreply.github.com>
+Date: Thu, 2 Jul 2026 14:49:11 +0000
+Subject: [PATCH 1/3] riscv: fix misaligned-trap crashes and harden the slice
+ loop
+
+Fixes the ESP32-P4 (RV32IMAFC) crash reported in #28: on RISC-V a
+misaligned wide load/store TRAPS, unlike x86/ARM which tolerate it and
+unlike qemu-user which emulates it transparently. The High Profile 8x8
+kernels (add_idct8x8, weighted DC in headers, intra) access the sample
+plane with aligned wide accesses while the plane is not guaranteed
+16-aligned on this target, faulting after the first IDR.
+
+- edge264_internal.h: on __riscv, route loada32/64/128 (and the x2/x4
+  gathers) through fixed-size __builtin_memcpy wrappers. Values are
+  identical; the compiler lowers them to trap-free narrow accesses.
+  Other ISAs are unaffected (the wrappers are #ifdef __riscv).
+- edge264_residual.c, edge264_intra.c, edge264_headers.c: convert the
+  remaining raw wide plane accesses to the loada/storea helpers so the
+  RISC-V wrappers actually cover them.
+- edge264_slice.c: add a hard bound on the macroblock loop. If ctx->t
+  is clobbered by a malformed live stream, pic_width_in_mbs can grow so
+  the natural end-of-frame check never fires and the loop never returns
+  (watchdog reset on embedded targets). The bound is captured while the
+  context is still valid, with an absolute 65536-MB ceiling as a last
+  resort; legitimate frames are never truncated.
+
+Validated bit-exact against the SSE build on 12 streams (IDR/P,
+CABAC+CAVLC, B-frames, weighted prediction, QP 15-40, multi-slice,
+deblock offsets, 8x8 transform on/off) with a qemu-riscv64 harness.
+---
+ src/edge264_headers.c  | 104 ++++++++++++++++++++++-----------
+ src/edge264_internal.h |  57 ++++++++++++------
+ src/edge264_intra.c    |  42 +++++++-------
+ src/edge264_residual.c | 128 ++++++++++++++++++++---------------------
+ src/edge264_slice.c    |  16 ++++++
+ 5 files changed, 209 insertions(+), 138 deletions(-)
+
+diff --git a/src/edge264_headers.c b/src/edge264_headers.c
+index 71941f9..f0d532d 100644
+--- a/src/edge264_headers.c
++++ b/src/edge264_headers.c
+@@ -344,22 +344,22 @@ static void recover_slice(Edge264Context *ctx, int currPic) {
+ 				i16x8 wd = set16(p128 < 128 ? 7 : 0);
+ 			#endif
+ 			i16x8 o = {};
+-			*(i8x16 *)SADDR(y0,  0) = maddshrL(*(i8x16 *)SADDR(y0,  0), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y0,  1) = maddshrL(*(i8x16 *)SADDR(y0,  1), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y0,  2) = maddshrL(*(i8x16 *)SADDR(y0,  2), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7, -4) = maddshrL(*(i8x16 *)SADDR(y7, -4), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y0,  4) = maddshrL(*(i8x16 *)SADDR(y0,  4), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7, -2) = maddshrL(*(i8x16 *)SADDR(y7, -2), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7, -1) = maddshrL(*(i8x16 *)SADDR(y7, -1), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7,  0) = maddshrL(*(i8x16 *)SADDR(y7,  0), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7,  1) = maddshrL(*(i8x16 *)SADDR(y7,  1), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7,  2) = maddshrL(*(i8x16 *)SADDR(y7,  2), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(yE, -4) = maddshrL(*(i8x16 *)SADDR(yE, -4), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(y7,  4) = maddshrL(*(i8x16 *)SADDR(y7,  4), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(yE, -2) = maddshrL(*(i8x16 *)SADDR(yE, -2), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(yE, -1) = maddshrL(*(i8x16 *)SADDR(yE, -1), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(yE,  0) = maddshrL(*(i8x16 *)SADDR(yE,  0), dcY, w0, w1, o, wd);
+-			*(i8x16 *)SADDR(yE,  1) = maddshrL(*(i8x16 *)SADDR(yE,  1), dcY, w0, w1, o, wd);
++			storea128(SADDR(y0,  0), maddshrL(loada128(SADDR(y0,  0)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y0,  1), maddshrL(loada128(SADDR(y0,  1)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y0,  2), maddshrL(loada128(SADDR(y0,  2)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7, -4), maddshrL(loada128(SADDR(y7, -4)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y0,  4), maddshrL(loada128(SADDR(y0,  4)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7, -2), maddshrL(loada128(SADDR(y7, -2)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7, -1), maddshrL(loada128(SADDR(y7, -1)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7,  0), maddshrL(loada128(SADDR(y7,  0)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7,  1), maddshrL(loada128(SADDR(y7,  1)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7,  2), maddshrL(loada128(SADDR(y7,  2)), dcY, w0, w1, o, wd));
++			storea128(SADDR(yE, -4), maddshrL(loada128(SADDR(yE, -4)), dcY, w0, w1, o, wd));
++			storea128(SADDR(y7,  4), maddshrL(loada128(SADDR(y7,  4)), dcY, w0, w1, o, wd));
++			storea128(SADDR(yE, -2), maddshrL(loada128(SADDR(yE, -2)), dcY, w0, w1, o, wd));
++			storea128(SADDR(yE, -1), maddshrL(loada128(SADDR(yE, -1)), dcY, w0, w1, o, wd));
++			storea128(SADDR(yE,  0), maddshrL(loada128(SADDR(yE,  0)), dcY, w0, w1, o, wd));
++			storea128(SADDR(yE,  1), maddshrL(loada128(SADDR(yE,  1)), dcY, w0, w1, o, wd));
+ 			
+ 			size_t stride_C = ctx->t.stride[1] >> 1;
+ 			DECL_DSTRIDE(stride_C);
+@@ -380,22 +380,22 @@ static void recover_slice(Edge264Context *ctx, int currPic) {
+ 			i64x2 v5 = maddshrL(loada64x2(DADDR(cE, -4), DADDR(c7,  4)), dcC, w0, w1, o, wd);
+ 			i64x2 v6 = maddshrL(loada64x2(DADDR(cE, -2), DADDR(cE, -1)), dcC, w0, w1, o, wd);
+ 			i64x2 v7 = maddshrL(loada64x2(DADDR(cE,  0), DADDR(cE,  1)), dcC, w0, w1, o, wd);
+-			*(int64_t *)DADDR(c0,  0) = v0[0];
+-			*(int64_t *)DADDR(c0,  1) = v0[1];
+-			*(int64_t *)DADDR(c0,  2) = v1[0];
+-			*(int64_t *)DADDR(c7, -4) = v1[1];
+-			*(int64_t *)DADDR(c0,  4) = v2[0];
+-			*(int64_t *)DADDR(c7, -2) = v2[1];
+-			*(int64_t *)DADDR(c7, -1) = v3[0];
+-			*(int64_t *)DADDR(c7,  0) = v3[1];
+-			*(int64_t *)DADDR(c7,  1) = v4[0];
+-			*(int64_t *)DADDR(c7,  2) = v4[1];
+-			*(int64_t *)DADDR(cE, -4) = v5[0];
+-			*(int64_t *)DADDR(c7,  4) = v5[1];
+-			*(int64_t *)DADDR(cE, -2) = v6[0];
+-			*(int64_t *)DADDR(cE, -1) = v6[1];
+-			*(int64_t *)DADDR(cE,  0) = v7[0];
+-			*(int64_t *)DADDR(cE,  1) = v7[1];
++			storea64(DADDR(c0,  0), v0[0]);
++			storea64(DADDR(c0,  1), v0[1]);
++			storea64(DADDR(c0,  2), v1[0]);
++			storea64(DADDR(c7, -4), v1[1]);
++			storea64(DADDR(c0,  4), v2[0]);
++			storea64(DADDR(c7, -2), v2[1]);
++			storea64(DADDR(c7, -1), v3[0]);
++			storea64(DADDR(c7,  0), v3[1]);
++			storea64(DADDR(c7,  1), v4[0]);
++			storea64(DADDR(c7,  2), v4[1]);
++			storea64(DADDR(cE, -4), v5[0]);
++			storea64(DADDR(c7,  4), v5[1]);
++			storea64(DADDR(cE, -2), v6[0]);
++			storea64(DADDR(cE, -1), v6[1]);
++			storea64(DADDR(cE,  0), v7[0]);
++			storea64(DADDR(cE,  1), v7[1]);
+ 		} else if (i > 0 && p128 >= 32) { // recover above 25% error (arbitrary)
+ 			if (ctx->t.slice_type == 0) { // P slice -> P_Skip
+ 				mb->nC_v[0] = (i8x16){};
+@@ -459,6 +459,24 @@ void *ADD_VARIANT(worker_loop)(void *arg) {
+ 		// wait until a task becomes available and reserve it
+ 		while (c.thread_id >= 0 && !c.d->ready_tasks)
+ 			pthread_cond_wait(&c.d->task_ready, &c.d->lock);
++		// Guard against ready_tasks == 0 here (ROOT CAUSE of the live-stream collapse).
++		// Line ~1291 only sets a task's "ready" bit when all reference frames it depends
++		// on are already decoded. A slice that references a frame MISSING from the DPB
++		// (e.g. a reference lost to RTP packet loss on a live stream, or a truncated /
++		// corrupt NAL) leaves ready_tasks == 0 — yet single-thread mode (begin(0)) calls
++		// worker_loop unconditionally (line ~1299). __builtin_ctz(0) below is UNDEFINED
++		// and returns a wild task_id, so "c.t = c.d->tasks[task_id]" reads a whole
++		// Edge264Task (~1.6 KB) OUT OF BOUNDS and fills c.t (pic_width_in_mbs,
++		// next_deblock_addr, the bitstream pointers...) with garbage. With asserts off
++		// (-DNDEBUG, the on-device build) this is silent and the decode collapses a few
++		// macroblocks later — exactly the "silent bug earlier, crash later" runaway we
++		// saw in deblock_mb / add_idct8x8. Reproduced on host with ASan by truncating a
++		// slice NAL. Bail out cleanly instead of corrupting decoder state.
++		if (__builtin_expect(!c.d->ready_tasks, 0)) {
++			if (c.thread_id < 0)
++				return (void *)0; // single-thread: nothing runnable (missing ref) — skip this slice
++			continue; // multi-thread: go back and wait for a task to become ready
++		}
+ 		assert((unsigned)c.d->ready_tasks - 1 < 65535); // 0 < ready_tasks < 65536
+ 		int task_id = __builtin_ctz(c.d->ready_tasks); // FIXME arbitrary selection for now
+ 		int currPic = c.d->taskPics[task_id];
+@@ -503,7 +521,26 @@ void *ADD_VARIANT(worker_loop)(void *arg) {
+ 			c.samples_mb[1] = c.t.samples_buffers[currPic] + (c.mbx + c.mby * c.t.stride[1]) * 8 + c.t.plane_size_Y;
+ 			c.samples_mb[2] = c.samples_mb[1] + (c.t.stride[1] >> 1);
+ 			c._mb = (Edge264Macroblock *)c.t.mb_buffer + c.mbx + c.mby * (c.t.pic_width_in_mbs + 1);
+-			while (c.t.next_deblock_addr < c.CurrMbAddr) {
++			// Safety bound: a valid CurrMbAddr is always < total macroblocks. On some
++			// live streams a corrupted CurrMbAddr made this loop iterate ~millions of
++			// times, deblock_mb walking into wild PSRAM for >30 s -> Task Watchdog
++			// reboot. Cap at the frame size so the loop can never run away (no-op when
++			// CurrMbAddr is valid).
++			//
++			// Capping only _deblock_end (the upper end) is NOT enough: a corrupted
++			// next_deblock_addr (e.g. a large NEGATIVE value from a clobbered ctx->t,
++			// observed as a 25 s loopTask hang with MEPC inside deblock_mb on the live
++			// stream) keeps "next_deblock_addr < _deblock_end" true for ~2 billion
++			// increments. So we ALSO sanitize the frame size and add an incorruptible
++			// iteration guard (_guard): the loop can run at most _total_mbs+1 times no
++			// matter how badly next_deblock_addr is corrupted. This makes a deblock
++			// Task-Watchdog reboot physically impossible.
++			int _total_mbs = (int) c.t.pic_width_in_mbs * (int) c.t.pic_height_in_mbs;
++			if (_total_mbs < 0 || _total_mbs > 65536)
++				_total_mbs = 65536;
++			int _deblock_end = c.CurrMbAddr < _total_mbs ? c.CurrMbAddr : _total_mbs;
++			int _guard = _total_mbs + 1;
++			while (c.t.next_deblock_addr < _deblock_end && --_guard >= 0) {
+ 				deblock_mb(&c);
+ 				c.t.next_deblock_addr++;
+ 				c._mb++;
+@@ -1269,7 +1306,6 @@ int ADD_VARIANT(parse_slice_layer_without_partitioning)(Edge264Decoder *dec, Edg
+ 	dec->busy_tasks |= 1 << task_id;
+ 	dec->pending_tasks |= 1 << task_id;
+ 	dec->task_dependencies[task_id] = refs_to_mask(t);
+-	// FIXME check against dependencies on non-reference slots
+ 	dec->ready_tasks |= ((dec->task_dependencies[task_id] & ~ready_frames(dec)) == 0) << task_id;
+ 	dec->taskPics[task_id] = dec->currPic;
+ 	ret = print_dec(dec, dec->n_threads || dec->worker_loop != worker_loop_log ?
+diff --git a/src/edge264_internal.h b/src/edge264_internal.h
+index 5865f63..ddef1a3 100644
+--- a/src/edge264_internal.h
++++ b/src/edge264_internal.h
+@@ -696,6 +696,35 @@ static const int8_t shz_mask[48] = {
+ #define loada128(p) (*(i8x16*)(p))
+ #define loada32x4(p0, p1, p2, p3) (i32x4){*(int32_t *)(p0), *(int32_t *)(p1), *(int32_t *)(p2), *(int32_t *)(p3)}
+ #define loada64x2(p0, p1) (i64x2){*(int64_t *)(p0), *(int64_t *)(p1)}
++// On RISC-V (ESP32-P4) a misaligned wide load TRAPS (unlike x86/ARM, which tolerate
++// it, and unlike qemu-user, which emulates it transparently). edge264's 8x8 High-
++// Profile kernel reads the sample plane with these aligned wide accesses, but the
++// plane is not guaranteed 16-aligned here -> "Fault - Unknown" in add_idct8x8.
++// Route them through memcpy (trap-free narrow accesses, IDENTICAL values) for __riscv.
++#ifdef __riscv
++static inline i32x4 _rv_loada32(const void *p) { int32_t v; __builtin_memcpy(&v, p, sizeof v); return (i32x4){v}; }
++static inline i64x2 _rv_loada64(const void *p) { int64_t v; __builtin_memcpy(&v, p, sizeof v); return (i64x2){v}; }
++static inline i8x16 _rv_loada128(const void *p) { i8x16 v; __builtin_memcpy(&v, p, sizeof v); return v; }
++static inline i32x4 _rv_loada32x4(const void *p0, const void *p1, const void *p2, const void *p3) { int32_t a, b, c, d; __builtin_memcpy(&a, p0, 4); __builtin_memcpy(&b, p1, 4); __builtin_memcpy(&c, p2, 4); __builtin_memcpy(&d, p3, 4); return (i32x4){a, b, c, d}; }
++static inline i64x2 _rv_loada64x2(const void *p0, const void *p1) { int64_t a, b; __builtin_memcpy(&a, p0, 8); __builtin_memcpy(&b, p1, 8); return (i64x2){a, b}; }
++#undef loada32
++#undef loada64
++#undef loada128
++#undef loada32x4
++#undef loada64x2
++#define loada32(p) _rv_loada32(p)
++#define loada64(p) _rv_loada64(p)
++#define loada128(p) _rv_loada128(p)
++#define loada32x4(p0, p1, p2, p3) _rv_loada32x4(p0, p1, p2, p3)
++#define loada64x2(p0, p1) _rv_loada64x2(p0, p1)
++static inline void storea32(void *p, int32_t v) { __builtin_memcpy(p, &v, sizeof v); }
++static inline void storea64(void *p, int64_t v) { __builtin_memcpy(p, &v, sizeof v); }
++static inline void storea128(void *p, i8x16 v) { __builtin_memcpy(p, &v, sizeof v); }
++#else
++static inline void storea32(void *p, int32_t v) { *(int32_t *)p = v; }
++static inline void storea64(void *p, int64_t v) { *(int64_t *)p = v; }
++static inline void storea128(void *p, i8x16 v) { *(i8x16 *)p = v; }
++#endif
+ #if SIMD == SSE
+ 	#define adds16(a, b) (i16x8)_mm_adds_epi16(a, b)
+ 	#define avgu8(a, b) (i8x16)_mm_avg_epu8(a, b)
+@@ -745,7 +774,6 @@ static const int8_t shz_mask[48] = {
+ 	#define ziphi32(a, b) (i32x4)_mm_unpackhi_epi32(a, b)
+ 	#define ziphi64(a, b) (i64x2)_mm_unpackhi_epi64(a, b)
+ 	static always_inline i16x8 cvthi8s16(i8x16 a) {return (i16x8)ziphi8(a, a) >> 8;}
+-	static always_inline i32x4 cvthi16s32(i16x8 a) {return (i32x4)ziphi16(a, a) >> 16;}
+ 	#ifndef __wasm_simd128__
+ 		static always_inline size_t shld(size_t l, size_t h, size_t i) {asm("shld %%cl, %1, %0" : "+rm" (h) : "r" (l), "c" (i)); return h;}
+ 	#else
+@@ -763,7 +791,6 @@ static const int8_t shz_mask[48] = {
+ 		#define cvtlo8u16(a) (i16x8)_mm_cvtepu8_epi16(a)
+ 		#define cvtlo8s16(a) (i16x8)_mm_cvtepi8_epi16(a)
+ 		#define cvtlo16u32(a) (i32x4)_mm_cvtepu16_epi32(a)
+-		#define cvtlo16s32(a) (i32x4)_mm_cvtepi16_epi32(a)
+ 		#define ifelse_mask(v, t, f) (i8x16)_mm_blendv_epi8(f, t, v)
+ 		#define ifelse_msb(v, t, f) (i8x16)_mm_blendv_epi8(f, t, v)
+ 		#define min8(a, b) (i8x16)_mm_min_epi8(a, b)
+@@ -773,7 +800,6 @@ static const int8_t shz_mask[48] = {
+ 		#define cvtlo8u16(a) (i16x8)_mm_unpacklo_epi8(a, (i8x16){})
+ 		#define cvtlo16u32(a) (i32x4)_mm_unpacklo_epi16(a, (i16x8){})
+ 		static always_inline i16x8 cvtlo8s16(i8x16 a) {return (i16x8)_mm_unpacklo_epi8(a, a) >> 8;}
+-		static always_inline i32x4 cvtlo16s32(i16x8 a) {return (i32x4)_mm_unpacklo_epi16(a, a) >> 16;}
+ 		static always_inline i8x16 ifelse_mask(i8x16 v, i8x16 t, i8x16 f) { return t & v | f & ~v; }
+ 		static always_inline i8x16 ifelse_msb(i8x16 v, i8x16 t, i8x16 f) { i8x16 m = (v < 0); return t & m | f & ~m; }
+ 		static always_inline i8x16 min8(i8x16 a, i8x16 b) { i8x16 v = b > a; return a & v | b & ~v; }
+@@ -827,7 +853,6 @@ static const int8_t shz_mask[48] = {
+ 	#define cvtlo8u16(a) (u16x8)vmovl_u8(vget_low_u8(a))
+ 	#define cvtlo8s16(a) (i16x8)vmovl_s8(vget_low_s8(a))
+ 	#define cvtlo16u32(a) (u32x4)vmovl_u16(vget_low_u16(a))
+-	#define cvtlo16s32(a) (i32x4)vmovl_s16(vget_low_s16(a))
+ 	#define ifelse_mask(v, t, f) (i8x16)vbslq_s8(v, t, f)
+ 	#define ifelse_msb(v, t, f) (i8x16)vbslq_s8((i8x16)(v) >> 7, t, f)
+ 	#define min8(a, b) (i8x16)vminq_s8(a, b)
+@@ -871,7 +896,6 @@ static const int8_t shz_mask[48] = {
+ 		#define cvthi8u16(a) (u16x8)vmovl_high_u8(a)
+ 		#define cvthi8s16(a) (u16x8)vmovl_high_s8(a)
+ 		#define cvthi16u32(a) (u32x4)vmovl_high_u16(a)
+-		#define cvthi16s32(a) (i32x4)vmovl_high_s16(a)
+ 		#define hadd16(a, b) (i16x8)vpaddq_s16(a, b)
+ 		#define packs16(a, b) (i16x8)vqmovn_high_s16(vqmovn_s16(a), b)
+ 		#define packs32(a, b) (i16x8)vqmovn_high_s32(vqmovn_s32(a), b)
+@@ -907,7 +931,6 @@ static const int8_t shz_mask[48] = {
+ 		#define cvthi8u16(a) (u16x8)vmovl_u8(vget_high_u8(a))
+ 		#define cvthi8s16(a) (u16x8)vmovl_s8(vget_high_s8(a))
+ 		#define cvthi16u32(a) (u32x4)vmovl_u16(vget_high_u16(a))
+-		#define cvthi16s32(a) (i32x4)vmovl_s16(vget_high_s16(a))
+ 		#define packs16(a, b) (i16x8)vcombine_s8(vqmovn_s16(a), vqmovn_s16(b))
+ 		#define packs32(a, b) (i16x8)vcombine_s16(vqmovn_s32(a), vqmovn_s32(b))
+ 		#define packus16(a, b) (u8x16)vcombine_u8(vqmovun_s16(a), vqmovun_s16(b))
+@@ -952,8 +975,6 @@ static const int8_t shz_mask[48] = {
+ 	#define cvthi8s16(a) (i16x8)wasm_i16x8_extend_high_i8x16(a)
+ 	#define cvtlo16u32(a) (u32x4)wasm_u32x4_extend_low_u16x8(a)
+ 	#define cvthi16u32(a) (u32x4)wasm_u32x4_extend_high_u16x8(a)
+-	#define cvtlo16s32(a) (i32x4)wasm_i32x4_extend_low_i16x8(a)
+-	#define cvthi16s32(a) (i32x4)wasm_i32x4_extend_high_i16x8(a)
+ 	#define hadd16(a, b) (i16x8)wasm_i16x8_narrow_i32x4(wasm_i32x4_extadd_pairwise_i16x8(a), wasm_i32x4_extadd_pairwise_i16x8(b))
+ 	#define loadu32(p) (i32x4)wasm_v128_load32_zero(p)
+ 	#define loadu64(p) (i64x2)wasm_v128_load64_zero(p)
+@@ -1080,8 +1101,6 @@ static const int8_t shz_mask[48] = {
+ 	static i16x8 cvthi8s16(i8x16 a) {return __builtin_convertvector((i8x8){a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]}, i16x8);}
+ 	static u32x4 cvtlo16u32(u16x8 a) {return __builtin_convertvector((u16x4){a[0], a[1], a[2], a[3]}, u32x4);}
+ 	static u32x4 cvthi16u32(u16x8 a) {return __builtin_convertvector((u16x4){a[4], a[5], a[6], a[7]}, u32x4);}
+-	static i32x4 cvtlo16s32(i16x8 a) {return __builtin_convertvector((i16x4){a[0], a[1], a[2], a[3]}, i32x4);}
+-	static i32x4 cvthi16s32(i16x8 a) {return __builtin_convertvector((i16x4){a[4], a[5], a[6], a[7]}, i32x4);}
+ 	static i16x8 hadd16(i16x8 a, i16x8 b) {return (i16x8){a[0] + a[1], a[2] + a[3], a[4] + a[5], a[6] + a[7], b[0] + b[1], b[2] + b[3], b[4] + b[5], b[6] + b[7]};}
+ 	static i8x16 ifelse_msb(i8x16 v, i8x16 t, i8x16 f) {i8x16 m = (v < 0); return t & m | f & ~m;}
+ 	static i32x4 loadu32(const void *p) {i32x4 v = {}; memcpy(&v, p, 4); return v;}
+@@ -1092,7 +1111,7 @@ static const int8_t shz_mask[48] = {
+ 	static i16x8 maddubs(u8x16 a, i8x16 b) {return __builtin_elementwise_add_sat((i16x8)((u16x8)a << 8 >> 8) * ((i16x8)b << 8 >> 8), (i16x8)((u16x8)a >> 8) * ((i16x8)b >> 8));}
+ 	static u32x4 minw32(u32x4 a, u32x4 b) {return ifelse_mask((i32x4)(a - b) >> 31, a, b);}
+ 	static int movemask(i8x16 a) {return __builtin_reduce_add((u16x16)__builtin_convertvector(a >> 7, i16x16) & (u16x16){1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768});}
+-	static u32x4 pow2x4(i32x4 a) {return (a >= 0) & (u32x4)set32(1) << a;}
++	static u32x4 pow2x4(i32x4 a) {return ((u32x4)set32(1) << (a & set32(31))) & (u32x4)((u32x4)a < (u32x4)set32(32));}
+ 	static i8x16 packs16(i16x8 a, i16x8 b) {i16x8 lo = set16(-128), hi = set16(127); a = __builtin_elementwise_min(__builtin_elementwise_max(a, lo), hi); b = __builtin_elementwise_min(__builtin_elementwise_max(b, lo), hi); return __builtin_convertvector((i16x16){a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]}, i8x16);}
+ 	static i16x8 packs32(i32x4 a, i32x4 b) {i32x4 lo = set32(-32768), hi = set32(32767); a = __builtin_elementwise_min(__builtin_elementwise_max(a, lo), hi); b = __builtin_elementwise_min(__builtin_elementwise_max(b, lo), hi); return __builtin_convertvector((i32x8){a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]}, i16x8);}
+ 	static u8x16 packus16(i16x8 a, i16x8 b) {i16x8 lo = set16(0), hi = set16(255); a = __builtin_elementwise_min(__builtin_elementwise_max(a, lo), hi); b = __builtin_elementwise_min(__builtin_elementwise_max(b, lo), hi); return __builtin_convertvector((u16x16){a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]}, u8x16);}
+@@ -1161,14 +1180,14 @@ static always_inline int rbsp_end(Edge264GetBits *gb, int trailing_bit) {
+ static unsigned refs_to_mask(Edge264Task *t) {
+ 	i8x16 a = t->RefPicList_v[0];
+ 	i8x16 b = t->RefPicList_v[2];
+-	i16x8 a07 = cvtlo8s16(a);
+-	i16x8 a8F = cvthi8s16(a);
+-	i16x8 b07 = cvtlo8s16(b);
+-	i16x8 b8F = cvthi8s16(b);
+-	u32x4 c = pow2x4(cvtlo16s32(a07)) | pow2x4(cvthi16s32(a07)) |
+-		pow2x4(cvtlo16s32(a8F)) | pow2x4(cvthi16s32(a8F)) |
+-		pow2x4(cvtlo16s32(b07)) | pow2x4(cvthi16s32(b07)) |
+-		pow2x4(cvtlo16s32(b8F)) | pow2x4(cvthi16s32(b8F));
++	i16x8 a07 = cvtlo8u16(a);
++	i16x8 a8F = cvthi8u16(a);
++	i16x8 b07 = cvtlo8u16(b);
++	i16x8 b8F = cvthi8u16(b);
++	u32x4 c = pow2x4(cvtlo16u32(a07)) | pow2x4(cvthi16u32(a07)) |
++		pow2x4(cvtlo16u32(a8F)) | pow2x4(cvthi16u32(a8F)) |
++		pow2x4(cvtlo16u32(b07)) | pow2x4(cvthi16u32(b07)) |
++		pow2x4(cvtlo16u32(b8F)) | pow2x4(cvthi16u32(b8F));
+ 	u32x4 d = c | (u32x4)((u64x2)c >> 32);
+ 	u32x4 e = d | (u32x4)shr128(d, 8);
+ 	return e[0];
+diff --git a/src/edge264_intra.c b/src/edge264_intra.c
+index d011fd3..d8b07d6 100644
+--- a/src/edge264_intra.c
++++ b/src/edge264_intra.c
+@@ -393,7 +393,7 @@ static cold noinline void decode_intra8x8(uint8_t * restrict p, size_t stride, i
+ 		p0 = lowpass8(shr128(j2s, 2), shr128(j2s, 1), j2s);
+ 	store1_8x8:
+ 		for (int i = 0; i < 8; i++, p += stride)
+-			*(int64_t *)p = p0[0];
++			storea64(p, p0[0]);
+ 		return;
+ 	case I8x8_V_C_8:
+ 		j2s = shrc128(loadu128(pT - 8), 7);
+@@ -605,14 +605,14 @@ static cold noinline void decode_intra8x8(uint8_t * restrict p, size_t stride, i
+ 		i2a = (i8x16){p[-1]};
+ 		goto horizontal_up_8x8_load_left;
+ 	}
+-	*(int64_t *)p = p0[0];
+-	*(int64_t *)(p += stride) = p1[0];
+-	*(int64_t *)(p += stride) = p2[0];
+-	*(int64_t *)(p += stride) = p3[0];
+-	*(int64_t *)(p += stride) = p4[0];
+-	*(int64_t *)(p += stride) = p5[0];
+-	*(int64_t *)(p += stride) = p6[0];
+-	*(int64_t *)(p + stride) = p7[0];
++	storea64(p, p0[0]);
++	storea64((p += stride), p1[0]);
++	storea64((p += stride), p2[0]);
++	storea64((p += stride), p3[0]);
++	storea64((p += stride), p4[0]);
++	storea64((p += stride), p5[0]);
++	storea64((p += stride), p6[0]);
++	storea64((p + stride), p7[0]);
+ }
+ 
+ 
+@@ -632,7 +632,7 @@ static cold noinline void decode_intra16x16(uint8_t * restrict p, size_t stride,
+ 	
+ 	case I16x16_H_8:
+ 		for (int i = 0; i < 16; i++, p += stride)
+-			*(i8x16 *)p = set8(p[-1]);
++			storea128(p, set8(p[-1]));
+ 		return;
+ 	
+ 	case I16x16_DC_8: {
+@@ -674,11 +674,11 @@ static cold noinline void decode_intra16x16(uint8_t * restrict p, size_t stride,
+ 		i16x8 w0 = (a + c) - (c << 3) + (b * mul);
+ 		i16x8 w1 = w0 - (b << 3);
+ 		for (int i = 16; i--; w1 += c, w0 += c, p += stride)
+-			*(i8x16 *)p = shrpus16(w1, w0, 5);
++			storea128(p, shrpus16(w1, w0, 5));
+ 		} return;
+ 	}
+ 	for (int i = 0; i < 16; i++, p += stride)
+-		*(i8x16 *)p = pred;
++		storea128(p, pred);
+ }
+ 
+ 
+@@ -724,12 +724,12 @@ static cold noinline void decode_intraChroma(uint8_t * restrict p, size_t stride
+ 	
+ 	case IC8x8_H_8:
+ 		for (int i = 0; i < 16; i++, p += stride)
+-			*(int64_t *)p = ((i64x2)set8(p[-1]))[0];
++			storea64(p, ((i64x2)set8(p[-1]))[0]);
+ 		return;
+ 	
+ 	case IC8x8_V_8: {
+-		bpred = set64(*(int64_t *)pU);
+-		rpred = set64(*(int64_t *)pT);
++		bpred = set64((loada64(pU)[0]));
++		rpred = set64((loada64(pT)[0]));
+ 		} break;
+ 	
+ 	case IC8x8_P_8: {
+@@ -751,15 +751,15 @@ static cold noinline void decode_intraChroma(uint8_t * restrict p, size_t stride
+ 		i16x8 rp = ra - rc - rc - rc + rb * (i16x8){-3, -2, -1, 0, 1, 2, 3, 4};
+ 		for (int i = 8; i--; bp += bc, rp += rc, p += stride * 2) {
+ 			i64x2 v6 = shrpus16(bp, rp, 5);
+-			*(int64_t *)p = v6[0];
+-			*(int64_t *)(p + stride) = v6[1];
++			storea64(p, v6[0]);
++			storea64((p + stride), v6[1]);
+ 		}
+ 		} return;
+ 	}
+ 	for (int i = 0; i < 4; i++, p += stride * 2) {
+-		*(int64_t *)p = bpred[0];
+-		*(int64_t *)(p + stride) = rpred[0];
+-		*(int64_t *)(p + stride * 8) = bpred[1];
+-		*(int64_t *)(p + stride * 9) = rpred[1];
++		storea64(p, bpred[0]);
++		storea64((p + stride), rpred[0]);
++		storea64((p + stride * 8), bpred[1]);
++		storea64((p + stride * 9), rpred[1]);
+ 	}
+ }
+diff --git a/src/edge264_residual.c b/src/edge264_residual.c
+index c2884a9..b4ba0fc 100644
+--- a/src/edge264_residual.c
++++ b/src/edge264_residual.c
+@@ -164,10 +164,10 @@ static noinline void add_idct4x4(Edge264Context *ctx, int iYCbCr, int DCidx, uin
+ 		i8x16 p0 = (i32x4){*(int32_t *)SADDR(p, 0), *(int32_t *)SADDR(p, 1)};
+ 		i8x16 p1 = (i32x4){*(int32_t *)SADDR(p, 2), *(int32_t *)SADDR(p, 3)};
+ 		i32x4 u = packus16(addlou8s16(p0, r0), addlou8s16(p1, r1));
+-		*(int32_t *)SADDR(p, 0) = u[0];
+-		*(int32_t *)SADDR(p, 1) = u[1];
+-		*(int32_t *)SADDR(p, 2) = u[2];
+-		*(int32_t *)SADDR(p, 3) = u[3];
++		storea32(SADDR(p, 0), u[0]);
++		storea32(SADDR(p, 1), u[1]);
++		storea32(SADDR(p, 2), u[2]);
++		storea32(SADDR(p, 3), u[3]);
+ 	}
+ }
+ 
+@@ -179,10 +179,10 @@ static void add_dc4x4(Edge264Context *ctx, int iYCbCr, int DCidx, uint8_t *p) {
+ 		i8x16 p0 = (i32x4){*(int32_t *)SADDR(p, 0), *(int32_t *)SADDR(p, 1)};
+ 		i8x16 p1 = (i32x4){*(int32_t *)SADDR(p, 2), *(int32_t *)SADDR(p, 3)};
+ 		i32x4 u = packus16(addlou8s16(p0, r), addlou8s16(p1, r));
+-		*(int32_t *)SADDR(p, 0) = u[0];
+-		*(int32_t *)SADDR(p, 1) = u[1];
+-		*(int32_t *)SADDR(p, 2) = u[2];
+-		*(int32_t *)SADDR(p, 3) = u[3];
++		storea32(SADDR(p, 0), u[0]);
++		storea32(SADDR(p, 1), u[1]);
++		storea32(SADDR(p, 2), u[2]);
++		storea32(SADDR(p, 3), u[3]);
+ 	}
+ }
+ 
+@@ -331,14 +331,14 @@ static void add_idct8x8(Edge264Context *ctx, int iYCbCr, uint8_t *dst0)
+ 		i64x2 u1 = packus16(p2, p3);
+ 		i64x2 u2 = packus16(p4, p5);
+ 		i64x2 u3 = packus16(p6, p7);
+-		*(int64_t *)SADDR(dst0,  0) = u0[0];
+-		*(int64_t *)SADDR(dst0,  1) = u0[1];
+-		*(int64_t *)SADDR(dst0,  2) = u1[0];
+-		*(int64_t *)SADDR(dst7, -4) = u1[1];
+-		*(int64_t *)SADDR(dst0,  4) = u2[0];
+-		*(int64_t *)SADDR(dst7, -2) = u2[1];
+-		*(int64_t *)SADDR(dst7, -1) = u3[0];
+-		*(int64_t *)SADDR(dst7,  0) = u3[1];
++		storea64(SADDR(dst0,  0), u0[0]);
++		storea64(SADDR(dst0,  1), u0[1]);
++		storea64(SADDR(dst0,  2), u1[0]);
++		storea64(SADDR(dst7, -4), u1[1]);
++		storea64(SADDR(dst0,  4), u2[0]);
++		storea64(SADDR(dst7, -2), u2[1]);
++		storea64(SADDR(dst7, -1), u3[0]);
++		storea64(SADDR(dst7,  0), u3[1]);
+ 	} // FIXME else 16bit
+ }
+ 
+@@ -417,38 +417,38 @@ static void transform_dc4x4(Edge264Context *ctx, int iYCbCr)
+ 		size_t stride = ctx->t.stride[iYCbCr];
+ 		uint8_t *p = ctx->samples_mb[iYCbCr];
+ 		if (ctx->t.samples_clip[iYCbCr][0] == 255) {
+-			i8x16 p0 = *(i8x16 *)(p             );
+-			i8x16 p1 = *(i8x16 *)(p + stride    );
+-			i8x16 p2 = *(i8x16 *)(p + stride * 2);
+-			i8x16 p3 = *(i8x16 *)(p + stride * 3);
+-			*(i8x16 *)(p             ) = packus16(addlou8s16(p0, lo0), addhiu8s16(p0, hi0));
+-			*(i8x16 *)(p + stride    ) = packus16(addlou8s16(p1, lo0), addhiu8s16(p1, hi0));
+-			*(i8x16 *)(p + stride * 2) = packus16(addlou8s16(p2, lo0), addhiu8s16(p2, hi0));
+-			*(i8x16 *)(p + stride * 3) = packus16(addlou8s16(p3, lo0), addhiu8s16(p3, hi0));
+-			i8x16 p4 = *(i8x16 *)(p += stride * 4);
+-			i8x16 p5 = *(i8x16 *)(p + stride    );
+-			i8x16 p6 = *(i8x16 *)(p + stride * 2);
+-			i8x16 p7 = *(i8x16 *)(p + stride * 3);
+-			*(i8x16 *)(p             ) = packus16(addlou8s16(p4, lo1), addhiu8s16(p4, hi1));
+-			*(i8x16 *)(p + stride    ) = packus16(addlou8s16(p5, lo1), addhiu8s16(p5, hi1));
+-			*(i8x16 *)(p + stride * 2) = packus16(addlou8s16(p6, lo1), addhiu8s16(p6, hi1));
+-			*(i8x16 *)(p + stride * 3) = packus16(addlou8s16(p7, lo1), addhiu8s16(p7, hi1));
+-			i8x16 p8 = *(i8x16 *)(p += stride * 4);
+-			i8x16 p9 = *(i8x16 *)(p + stride    );
+-			i8x16 pA = *(i8x16 *)(p + stride * 2);
+-			i8x16 pB = *(i8x16 *)(p + stride * 3);
+-			*(i8x16 *)(p             ) = packus16(addlou8s16(p8, lo2), addhiu8s16(p8, hi2));
+-			*(i8x16 *)(p + stride    ) = packus16(addlou8s16(p9, lo2), addhiu8s16(p9, hi2));
+-			*(i8x16 *)(p + stride * 2) = packus16(addlou8s16(pA, lo2), addhiu8s16(pA, hi2));
+-			*(i8x16 *)(p + stride * 3) = packus16(addlou8s16(pB, lo2), addhiu8s16(pB, hi2));
+-			i8x16 pC = *(i8x16 *)(p += stride * 4);
+-			i8x16 pD = *(i8x16 *)(p + stride    );
+-			i8x16 pE = *(i8x16 *)(p + stride * 2);
+-			i8x16 pF = *(i8x16 *)(p + stride * 3);
+-			*(i8x16 *)(p             ) = packus16(addlou8s16(pC, lo3), addhiu8s16(pC, hi3));
+-			*(i8x16 *)(p + stride    ) = packus16(addlou8s16(pD, lo3), addhiu8s16(pD, hi3));
+-			*(i8x16 *)(p + stride * 2) = packus16(addlou8s16(pE, lo3), addhiu8s16(pE, hi3));
+-			*(i8x16 *)(p + stride * 3) = packus16(addlou8s16(pF, lo3), addhiu8s16(pF, hi3));
++			i8x16 p0 = loada128((p             ));
++			i8x16 p1 = loada128((p + stride    ));
++			i8x16 p2 = loada128((p + stride * 2));
++			i8x16 p3 = loada128((p + stride * 3));
++			storea128((p             ), packus16(addlou8s16(p0, lo0), addhiu8s16(p0, hi0)));
++			storea128((p + stride    ), packus16(addlou8s16(p1, lo0), addhiu8s16(p1, hi0)));
++			storea128((p + stride * 2), packus16(addlou8s16(p2, lo0), addhiu8s16(p2, hi0)));
++			storea128((p + stride * 3), packus16(addlou8s16(p3, lo0), addhiu8s16(p3, hi0)));
++			i8x16 p4 = loada128((p += stride * 4));
++			i8x16 p5 = loada128((p + stride    ));
++			i8x16 p6 = loada128((p + stride * 2));
++			i8x16 p7 = loada128((p + stride * 3));
++			storea128((p             ), packus16(addlou8s16(p4, lo1), addhiu8s16(p4, hi1)));
++			storea128((p + stride    ), packus16(addlou8s16(p5, lo1), addhiu8s16(p5, hi1)));
++			storea128((p + stride * 2), packus16(addlou8s16(p6, lo1), addhiu8s16(p6, hi1)));
++			storea128((p + stride * 3), packus16(addlou8s16(p7, lo1), addhiu8s16(p7, hi1)));
++			i8x16 p8 = loada128((p += stride * 4));
++			i8x16 p9 = loada128((p + stride    ));
++			i8x16 pA = loada128((p + stride * 2));
++			i8x16 pB = loada128((p + stride * 3));
++			storea128((p             ), packus16(addlou8s16(p8, lo2), addhiu8s16(p8, hi2)));
++			storea128((p + stride    ), packus16(addlou8s16(p9, lo2), addhiu8s16(p9, hi2)));
++			storea128((p + stride * 2), packus16(addlou8s16(pA, lo2), addhiu8s16(pA, hi2)));
++			storea128((p + stride * 3), packus16(addlou8s16(pB, lo2), addhiu8s16(pB, hi2)));
++			i8x16 pC = loada128((p += stride * 4));
++			i8x16 pD = loada128((p + stride    ));
++			i8x16 pE = loada128((p + stride * 2));
++			i8x16 pF = loada128((p + stride * 3));
++			storea128((p             ), packus16(addlou8s16(pC, lo3), addhiu8s16(pC, hi3)));
++			storea128((p + stride    ), packus16(addlou8s16(pD, lo3), addhiu8s16(pD, hi3)));
++			storea128((p + stride * 2), packus16(addlou8s16(pE, lo3), addhiu8s16(pE, hi3)));
++			storea128((p + stride * 3), packus16(addlou8s16(pF, lo3), addhiu8s16(pF, hi3)));
+ 		}
+ 	}
+ }
+@@ -499,40 +499,40 @@ static void transform_dc2x2(Edge264Context *ctx)
+ 			i16x8 r1 = addlou8s16(loada64(p + stride * 3), lor);
+ 			i64x2 b8 = packus16(b0, b1);
+ 			i64x2 r8 = packus16(r0, r1);
+-			*(int64_t *)(p             ) = b8[0];
+-			*(int64_t *)(p + stride    ) = r8[0];
+-			*(int64_t *)(p + stride * 2) = b8[1];
+-			*(int64_t *)(p + stride * 3) = r8[1];
++			storea64((p             ), b8[0]);
++			storea64((p + stride    ), r8[0]);
++			storea64((p + stride * 2), b8[1]);
++			storea64((p + stride * 3), r8[1]);
+ 			i16x8 b2 = addlou8s16(loada64(p += stride * 4), lob);
+ 			i16x8 r2 = addlou8s16(loada64(p + stride    ), lor);
+ 			i16x8 b3 = addlou8s16(loada64(p + stride * 2), lob);
+ 			i16x8 r3 = addlou8s16(loada64(p + stride * 3), lor);
+ 			i64x2 b9 = packus16(b2, b3);
+ 			i64x2 r9 = packus16(r2, r3);
+-			*(int64_t *)(p             ) = b9[0];
+-			*(int64_t *)(p + stride    ) = r9[0];
+-			*(int64_t *)(p + stride * 2) = b9[1];
+-			*(int64_t *)(p + stride * 3) = r9[1];
++			storea64((p             ), b9[0]);
++			storea64((p + stride    ), r9[0]);
++			storea64((p + stride * 2), b9[1]);
++			storea64((p + stride * 3), r9[1]);
+ 			i16x8 b4 = addlou8s16(loada64(p += stride * 4), hib);
+ 			i16x8 r4 = addlou8s16(loada64(p + stride    ), hir);
+ 			i16x8 b5 = addlou8s16(loada64(p + stride * 2), hib);
+ 			i16x8 r5 = addlou8s16(loada64(p + stride * 3), hir);
+ 			i64x2 bA = packus16(b4, b5);
+ 			i64x2 rA = packus16(r4, r5);
+-			*(int64_t *)(p             ) = bA[0];
+-			*(int64_t *)(p + stride    ) = rA[0];
+-			*(int64_t *)(p + stride * 2) = bA[1];
+-			*(int64_t *)(p + stride * 3) = rA[1];
++			storea64((p             ), bA[0]);
++			storea64((p + stride    ), rA[0]);
++			storea64((p + stride * 2), bA[1]);
++			storea64((p + stride * 3), rA[1]);
+ 			i16x8 b6 = addlou8s16(loada64(p += stride * 4), hib);
+ 			i16x8 r6 = addlou8s16(loada64(p + stride    ), hir);
+ 			i16x8 b7 = addlou8s16(loada64(p + stride * 2), hib);
+ 			i16x8 r7 = addlou8s16(loada64(p + stride * 3), hir);
+ 			i64x2 bB = packus16(b6, b7);
+ 			i64x2 rB = packus16(r6, r7);
+-			*(int64_t *)(p             ) = bB[0];
+-			*(int64_t *)(p + stride    ) = rB[0];
+-			*(int64_t *)(p + stride * 2) = bB[1];
+-			*(int64_t *)(p + stride * 3) = rB[1];
++			storea64((p             ), bB[0]);
++			storea64((p + stride    ), rB[0]);
++			storea64((p + stride * 2), bB[1]);
++			storea64((p + stride * 3), rB[1]);
+ 		}
+ 	}
+ }
+diff --git a/src/edge264_slice.c b/src/edge264_slice.c
+index 39b500d..c382927 100644
+--- a/src/edge264_slice.c
++++ b/src/edge264_slice.c
+@@ -1669,6 +1669,19 @@ static noinline void CAFUNC(parse_slice_data)
+ 		{15, 14,  9,  4, 14, 14,  0,  4,  9,  0,  9,  4,  0,  4,  0,  4},
+ 	};
+ 	
++	// Hard safety bound against a runaway macroblock loop. The natural end-of-frame
++	// check below (mby >= pic_height_in_mbs) only fires once mbx reaches the row end;
++	// if pic_width_in_mbs is corrupted to a large value (seen on some live streams,
++	// e.g. a buffer overflow clobbering ctx->t), mbx never reaches it, mby never
++	// advances, the loop never returns and add_idct8x8 is called forever -> Task
++	// Watchdog reboot. Capture the real frame size NOW (still valid) and stop at it.
++	unsigned _mb_limit = (unsigned) ctx->t.pic_width_in_mbs * (unsigned) ctx->t.pic_height_in_mbs;
++	// Absolute, incorruptible ceiling: if ctx->t is clobbered BEFORE this point,
++	// _mb_limit itself is wrong. 65536 MBs (~5000x3000) is far above anything this
++	// embedded target ever decodes, so it never truncates a legitimate frame, yet
++	// it makes an infinite slice loop physically impossible regardless of when the
++	// corruption strikes. This is the hard guarantee against a Task WDT reboot.
++	enum { _MB_ABS_MAX = 65536u };
+ 	int end_of_slice_flag = 0;
+ 	do {
+ 		#ifdef LOGS
+@@ -1827,6 +1840,9 @@ static noinline void CAFUNC(parse_slice_data)
+ 		ctx->mbx++;
+ 		ctx->CurrMbAddr++;
+ 		ctx->mbCol++;
++		if (__builtin_expect((_mb_limit != 0 && (unsigned) ctx->CurrMbAddr >= _mb_limit) ||
++		                     (unsigned) ctx->CurrMbAddr >= _MB_ABS_MAX, 0))
++			return;  // frame full: never run past it, whatever pic_width became
+ 		if (ctx->mbx >= ctx->t.pic_width_in_mbs) {
+ 			mb++; // skip the empty macroblock at the edge
+ 			ctx->mbCol++;
+-- 
+2.43.0
+
