@@ -126,6 +126,22 @@ class IPCameraViewer : public Component {
   std::atomic<bool> decode_task_idle_{true};
   bool pending_shutdown_{false};
 
+  // --- Conversion YUV->RGB565 matérielle (PPA du P4) --------------------------
+  // La conversion scalaire coûte ~40 ms/frame (dominée par le trafic PSRAM, en
+  // concurrence avec l'écran MIPI-DSI) et plafonne l'affichage à ~6-7 fps. Le
+  // bloc PPA sait convertir YUV420->RGB565 en DMA. Son format YUV420 matériel
+  // est packé par lignes (lignes paires "U Y Y U Y Y...", impaires "V Y Y...",
+  // cf. ESP_H264_RAW_FMT_O_UYY_E_VYY) : le repack depuis les plans I420 du DPB
+  // edge264 est FUSIONNÉ dans la copie de sortie du décodeur (coût ~équivalent
+  // aux memcpy qu'il remplace). Repli scalaire automatique si l'init PPA échoue,
+  // si les dimensions flux != config (letterbox), ou si une opération échoue.
+  void *ppa_client_{nullptr};   // ppa_client_handle_t (opaque pour l'en-tête)
+  uint8_t *ouyy_buffer_{nullptr};
+  bool ppa_ok_{false};
+  bool yuv_is_ouyy_{false};  // la frame en attente est au format O_UYY_E_VYY
+  void init_ppa_();
+  bool ppa_convert_(uint8_t *dst_rgb565);
+
   // JPEG receive buffer
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};

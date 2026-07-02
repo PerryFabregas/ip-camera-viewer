@@ -10,6 +10,14 @@
 #include <arpa/inet.h>
 #include <sys/select.h>
 #include <sys/ioctl.h>  // FIONREAD (mesure du backlog TCP, régulateur de latence)
+
+// PPA (Pixel Processing Accelerator, ESP32-P4) : conversion YUV420->RGB565
+// matérielle. Présent dans ESP-IDF >= 5.3 pour le P4 ; garde d'inclusion pour
+// que le composant compile aussi sans le driver (repli scalaire).
+#if __has_include(<driver/ppa.h>)
+#include <driver/ppa.h>
+#define USE_IPCV_PPA 1
+#endif
 #include "mbedtls/base64.h"
 #include "mbedtls/md5.h"
 #include "esp_task_wdt.h"
@@ -121,24 +129,32 @@ void IPCameraViewer::decode_task_fn_(void *arg) {
     if (cam->fetch_rtp_frame_()) {
       if (cam->decode_h264_to_yuv_() &&
           !cam->decode_frame_ready_.load(std::memory_order_acquire)) {
-        // DIAG : temps de conversion YUV->RGB565 moyenné sur 64 frames. C'est le
-        // 2e poste du pipeline après edge264 ; s'il domine, c'est lui qui plafonne
-        // les FPS (candidat à l'accélération PPA matérielle).
+        // DIAG : temps de conversion YUV->RGB565 moyenné sur 64 frames. PPA
+        // matériel quand la frame est au format O_UYY (voir decode_h264_to_yuv_),
+        // conversion scalaire sinon.
         const int64_t _cv0 = esp_timer_get_time();
-        cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
-                                       cam->width_, cam->height_);
+        bool converted;
+        if (cam->yuv_is_ouyy_ && cam->ppa_ok_) {
+          converted = cam->ppa_convert_(cam->current_decode_buffer_);
+        } else {
+          cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
+                                         cam->width_, cam->height_);
+          converted = true;
+        }
         static int64_t cv_acc = 0;
         static uint32_t cv_n = 0;
         cv_acc += esp_timer_get_time() - _cv0;
         if (++cv_n == 64) {
-          ESP_LOGI(TAG, "Conversion YUV->RGB565 : %lld ms/frame (moyenne sur 64)",
-                   (long long) (cv_acc / 64000));
+          ESP_LOGI(TAG, "Conversion YUV->RGB565 : %lld ms/frame (moyenne sur 64%s)",
+                   (long long) (cv_acc / 64000),
+                   (cam->yuv_is_ouyy_ && cam->ppa_ok_) ? ", PPA" : ", CPU");
           cv_acc = 0;
           cv_n = 0;
         }
         // Release : la frame convertie dans current_decode_buffer_ est visible pour
         // le loopTask qui la lira après avoir vu decode_frame_ready_ == true.
-        cam->decode_frame_ready_.store(true, std::memory_order_release);
+        if (converted)
+          cam->decode_frame_ready_.store(true, std::memory_order_release);
       }
     } else {
       vTaskDelay(pdMS_TO_TICKS(3));
@@ -443,6 +459,67 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
   }
 }
 
+void IPCameraViewer::init_ppa_() {
+#ifdef USE_IPCV_PPA
+  if (this->ppa_client_ != nullptr) {
+    this->ppa_ok_ = true;
+    return;
+  }
+  ppa_client_config_t cfg = {};
+  cfg.oper_type = PPA_OPERATION_SRM;
+  ppa_client_handle_t client = nullptr;
+  esp_err_t err = ppa_register_client(&cfg, &client);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "PPA indisponible (%s) — conversion YUV->RGB565 logicielle.",
+             esp_err_to_name(err));
+    this->ppa_ok_ = false;
+    return;
+  }
+  this->ppa_client_ = client;
+  this->ppa_ok_ = true;
+  ESP_LOGI(TAG, "PPA prêt : conversion YUV420->RGB565 matérielle activée.");
+#else
+  this->ppa_ok_ = false;
+#endif
+}
+
+bool IPCameraViewer::ppa_convert_(uint8_t *dst_rgb565) {
+#ifdef USE_IPCV_PPA
+  ppa_srm_oper_config_t op = {};
+  op.in.buffer = this->ouyy_buffer_;
+  op.in.pic_w = this->width_;
+  op.in.pic_h = this->height_;
+  op.in.block_w = this->width_;
+  op.in.block_h = this->height_;
+  op.in.srm_cm = PPA_SRM_COLOR_MODE_YUV420;
+  // Plein range + BT.601 : mêmes coefficients que la conversion scalaire
+  // historique (r = y + 1.402v etc.) -> rendu visuel identique.
+  op.in.yuv_range = PPA_COLOR_RANGE_FULL;
+  op.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+  op.out.buffer = dst_rgb565;
+  op.out.buffer_size = this->rgb565_buffer_size_;
+  op.out.pic_w = this->width_;
+  op.out.pic_h = this->height_;
+  op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+  op.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+  op.scale_x = 1.0f;
+  op.scale_y = 1.0f;
+  op.mode = PPA_TRANS_MODE_BLOCKING;  // le DMA travaille, la tâche dort
+  esp_err_t err = ppa_do_scale_rotate_mirror((ppa_client_handle_t) this->ppa_client_, &op);
+  if (err != ESP_OK) {
+    // Échec (alignement, dimension...) : repli scalaire définitif, frame perdue.
+    ESP_LOGW(TAG, "PPA SRM en échec (%s) — repli sur la conversion logicielle.",
+             esp_err_to_name(err));
+    this->ppa_ok_ = false;
+    return false;
+  }
+  return true;
+#else
+  (void) dst_rgb565;
+  return false;
+#endif
+}
+
 bool IPCameraViewer::init_buffers_() {
   // ESP32-P4 JPEG decoder requires dimensions to be 16-byte aligned
   // Round up to nearest multiple of 16
@@ -452,14 +529,16 @@ bool IPCameraViewer::init_buffers_() {
   ESP_LOGI(TAG, "Image dimensions: %ux%u (configured) -> %ux%u (16-byte aligned)",
            this->width_, this->height_, aligned_width, aligned_height);
 
-  // RGB565 buffer size: aligned_width * aligned_height * 2 bytes
-  this->rgb565_buffer_size_ = aligned_width * aligned_height * 2;
+  // RGB565 buffer size: aligned_width * aligned_height * 2 bytes, arrondi à 128
+  // (le PPA exige des buffers de sortie alignés/dimensionnés sur la ligne de
+  // cache L2 du P4 = 128 octets ; sans PPA c'est du simple slack inoffensif)
+  this->rgb565_buffer_size_ = (aligned_width * aligned_height * 2 + 127) & ~(size_t) 127;
 
-  // Allocate double buffers for RGB565 with 64-byte alignment for JPEG decoder
-  // Using heap_caps_aligned_alloc instead of jpeg_alloc_decoder_mem to avoid initialization issues
-  this->rgb565_buffer_a_ = (uint8_t *)heap_caps_aligned_alloc(64, this->rgb565_buffer_size_,
+  // Allocate double buffers for RGB565 with 128-byte alignment (JPEG decoder
+  // needs 64, the PPA needs L1+L2 cache-line alignment = 128 on the P4)
+  this->rgb565_buffer_a_ = (uint8_t *)heap_caps_aligned_alloc(128, this->rgb565_buffer_size_,
                                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  this->rgb565_buffer_b_ = (uint8_t *)heap_caps_aligned_alloc(64, this->rgb565_buffer_size_,
+  this->rgb565_buffer_b_ = (uint8_t *)heap_caps_aligned_alloc(128, this->rgb565_buffer_size_,
                                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
   if (this->rgb565_buffer_a_ == nullptr || this->rgb565_buffer_b_ == nullptr) {
@@ -555,6 +634,15 @@ bool IPCameraViewer::init_buffers_() {
       ESP_LOGE(TAG, "Failed to allocate H264/YUV buffers");
       return false;
     }
+
+    // Buffer O_UYY_E_VYY pour la conversion PPA matérielle (même taille 12 bpp,
+    // aligné 128 pour le DMA). Optionnel : s'il manque, repli scalaire.
+    size_t ouyy_size = ((size_t) this->width_ * this->height_ * 3 / 2 + 127) & ~(size_t) 127;
+    this->ouyy_buffer_ = (uint8_t *) heap_caps_aligned_alloc(128, ouyy_size,
+                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    this->init_ppa_();
+    if (this->ouyy_buffer_ == nullptr)
+      this->ppa_ok_ = false;
   }
 
   ESP_LOGI(TAG, "Buffers allocated successfully");
@@ -606,6 +694,21 @@ void IPCameraViewer::free_buffers_() {
     free(this->yuv_buffer_);
     this->yuv_buffer_ = nullptr;
   }
+  if (this->ouyy_buffer_ != nullptr) {
+    free(this->ouyy_buffer_);
+    this->ouyy_buffer_ = nullptr;
+  }
+#ifdef USE_IPCV_PPA
+  // Client PPA : libéré ici (la tâche de décodage est garantie inactive quand
+  // free_buffers_ est appelé — voir l'arrêt différé). Ré-enregistré au prochain
+  // init_buffers_.
+  if (this->ppa_client_ != nullptr) {
+    ppa_unregister_client((ppa_client_handle_t) this->ppa_client_);
+    this->ppa_client_ = nullptr;
+  }
+  this->ppa_ok_ = false;
+  this->yuv_is_ouyy_ = false;
+#endif
 
   // Reset buffer sizes
   this->rgb565_buffer_size_ = 0;
@@ -2240,6 +2343,35 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
     while (this->hp_decoder_.get_frame(&f)) {
       const int sw = f.width & ~1;   // dimensions paires (4:2:0) du flux décodé
       const int sh = f.height & ~1;
+      if (this->ppa_ok_ && this->ouyy_buffer_ != nullptr && sw == (int) this->width_ &&
+          sh == (int) this->height_ && f.y && f.cb && f.cr) {
+        // Chemin PPA : repack I420 (plans du DPB) -> O_UYY_E_VYY, FUSIONNÉ dans
+        // la copie de sortie (remplace les memcpy du chemin planaire, coût
+        // équivalent). Lignes paires "U Y Y...", impaires "V Y Y..." (format
+        // YUV420 matériel du P4). La conversion RGB565 sera faite par le PPA.
+        const size_t line3 = (size_t) this->width_ * 3 / 2;
+        for (int row = 0; row < sh; row += 2) {
+          const uint8_t *y0 = f.y + (size_t) row * f.stride_y;
+          const uint8_t *y1 = y0 + f.stride_y;
+          const uint8_t *u = f.cb + (size_t) (row >> 1) * f.stride_c;
+          const uint8_t *v = f.cr + (size_t) (row >> 1) * f.stride_c;
+          uint8_t *o0 = this->ouyy_buffer_ + (size_t) row * line3;
+          uint8_t *o1 = o0 + line3;
+          for (int x = 0, c = 0; x < sw; x += 2, c++) {
+            *o0++ = u[c];
+            *o0++ = y0[x];
+            *o0++ = y0[x + 1];
+            *o1++ = v[c];
+            *o1++ = y1[x];
+            *o1++ = y1[x + 1];
+          }
+        }
+        this->yuv_is_ouyy_ = true;
+        got = true;
+        this->hp_decoder_.release_frame();
+        continue;
+      }
+      this->yuv_is_ouyy_ = false;
       if (sw > 0 && sh > 0 && f.y && f.cb && f.cr) {
         // Le canvas LVGL et convert_yuv420_to_rgb565_ sont FIXÉS à width_/height_
         // (config YAML). On dispose donc l'image décodée dans un plan I420 à la
