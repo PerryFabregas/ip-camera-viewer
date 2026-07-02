@@ -319,7 +319,7 @@ on_click:
 ```yaml
 ip_camera_viewer:
   - id: security_cam_1
-    url: "rtsp://username:password@192.168.1.56:554/stream2"
+    url: "rtsp://username:password@:554/stream2"
     protocol: rtsp   # "h264" is accepted as an alias
     width: 320
     height: 240
@@ -494,7 +494,7 @@ logger:
 
 ```bash
 # Test MJPEG in a browser
-http://192.168.1.38:1984/api/stream.mjpeg?src=frigate1_esp32
+http://:1984/api/stream.mjpeg?src=frigate1_esp32
 
 # Test H264 with ffplay
 ffplay -rtsp_transport tcp rtsp://user:pass@192.168.1.56:554/stream2
