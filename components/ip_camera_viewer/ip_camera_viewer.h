@@ -113,6 +113,19 @@ class IPCameraViewer : public Component {
   // multicœur = mémoire faiblement ordonnée).
   std::atomic<bool> decode_frame_ready_{false};
 
+  // --- Arrêt propre AVEC libération mémoire (switch OFF) ---------------------
+  // La tâche de décodage peut être en plein travail (fetch/decode/convert) au
+  // moment du stop : libérer les buffers immédiatement = use-after-free.
+  // Handshake (seq_cst, pattern Dekker) :
+  //  - decode_run_ : consigne "tu peux travailler". Le stop la met à false.
+  //  - decode_task_idle_ : la tâche la met à false AVANT de toucher aux buffers
+  //    (puis re-vérifie decode_run_), à true quand elle se met en veille.
+  //  - pending_shutdown_ : le loop() re-tente à chaque tour ; dès que la tâche
+  //    est idle, il déconnecte et libère (buffers + DPB edge264, plusieurs Mo).
+  std::atomic<bool> decode_run_{true};
+  std::atomic<bool> decode_task_idle_{true};
+  bool pending_shutdown_{false};
+
   // JPEG receive buffer
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};

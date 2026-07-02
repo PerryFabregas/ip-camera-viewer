@@ -90,10 +90,21 @@ void IPCameraViewer::setup() {
 void IPCameraViewer::decode_task_fn_(void *arg) {
   IPCameraViewer *cam = static_cast<IPCameraViewer *>(arg);
   for (;;) {
-    // Inactif tant que le flux n'est pas prêt.
-    if (!cam->enabled_ || !cam->stream_connected_ || cam->protocol_ == Protocol::MJPEG ||
-        cam->rgb565_buffer_a_ == nullptr || cam->yuv_buffer_ == nullptr) {
+    // Inactif tant que le flux n'est pas prêt ou que l'arrêt est demandé.
+    if (!cam->decode_run_.load() || !cam->enabled_ || !cam->stream_connected_ ||
+        cam->protocol_ == Protocol::MJPEG || cam->rgb565_buffer_a_ == nullptr ||
+        cam->yuv_buffer_ == nullptr) {
+      cam->decode_task_idle_.store(true);
       vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    // Se déclarer occupé PUIS re-vérifier la consigne d'arrêt (pattern Dekker) :
+    // le loop() fait l'inverse (consigne à false PUIS lecture d'idle). Ainsi,
+    // quand le loop() observe idle==true après avoir posé decode_run_=false, la
+    // tâche ne peut plus toucher aux buffers -> libération sans use-after-free.
+    cam->decode_task_idle_.store(false);
+    if (!cam->decode_run_.load()) {
+      cam->decode_task_idle_.store(true);
       continue;
     }
 #ifdef USE_H264_HP_EDGE264
@@ -216,6 +227,10 @@ void IPCameraViewer::loop() {
     // Connection successful! Reset retry counter
     ESP_LOGI(TAG, "Connection established after %u attempt(s)", this->connection_attempts_);
     this->connection_attempts_ = 0;
+    // Ré-armer la tâche de décodage (elle a pu être arrêtée par un switch OFF) ;
+    // annule aussi un éventuel arrêt différé si l'utilisateur a rebasculé vite.
+    this->pending_shutdown_ = false;
+    this->decode_run_.store(true);
 
     this->lvgl_timer_ = lv_timer_create(lvgl_timer_callback_, this->update_interval_, this);
     if (this->lvgl_timer_ == nullptr) {
@@ -233,12 +248,14 @@ void IPCameraViewer::loop() {
 
     if (this->decode_task_handle_ != nullptr) {
       // Une tâche de décodage tourne en fond et peut être EN TRAIN d'utiliser les
-      // buffers/le socket (décodage d'une I-frame ~11 s). Déconnecter ou libérer ici
-      // = use-after-free. On se contente de mettre en pause : enabled_ est déjà false,
-      // donc la tâche s'arrête de fetcher/décoder à sa prochaine itération (TCP
-      // backpressure met le flux caméra en pause). Buffers/connexion conservés ;
-      // tout reprend proprement à la réactivation.
-      ESP_LOGI(TAG, "IP Camera Viewer en pause (tâche de décodage active — buffers conservés)");
+      // buffers/le socket. On ne libère pas ici (use-after-free) : on pose la
+      // consigne d'arrêt et on libérera dès que la tâche est idle (bloc
+      // pending_shutdown_ ci-dessous, re-tenté à chaque loop()). La tâche finit
+      // sa frame en cours (au pire ~200-400 ms) puis se met en veille.
+      this->decode_run_.store(false);
+      this->pending_shutdown_ = true;
+      ESP_LOGI(TAG, "Arrêt demandé — attente de la fin de la frame en cours pour "
+                    "libérer la mémoire...");
     } else {
       if (this->protocol_ == Protocol::MJPEG) {
         this->disconnect_mjpeg_stream_();
@@ -250,6 +267,25 @@ void IPCameraViewer::loop() {
       this->free_buffers_();
       ESP_LOGI(TAG, "IP Camera Viewer display stopped and buffers freed");
     }
+  }
+
+  // Arrêt différé (tâche de décodage) : dès que la tâche est réellement inactive
+  // (decode_task_idle_ + decode_run_ false, voir le handshake dans le header),
+  // déconnecter et LIBÉRER la mémoire — buffers RGB/YUV/H264 et surtout le DPB
+  // edge264 (plusieurs Mo de PSRAM). Correction du switch OFF qui ne libérait rien.
+  if (!this->enabled_ && this->pending_shutdown_) {
+    if (this->decode_task_idle_.load()) {
+      if (this->protocol_ == Protocol::MJPEG) {
+        this->disconnect_mjpeg_stream_();
+      } else {
+        this->disconnect_rtsp_stream_();
+      }
+      this->free_buffers_();
+      this->pending_shutdown_ = false;
+      ESP_LOGI(TAG, "IP Camera Viewer arrêté — mémoire libérée (PSRAM libre : %u Ko)",
+               (unsigned) (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    }
+    // sinon : on retente au prochain loop(), la tâche termine sa frame en cours
   }
 }
 
