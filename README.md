@@ -33,6 +33,8 @@ external_components:
       ref: main
     components:
       - ip_camera_viewer
+      - h264_hp
+      - esp_h264
     refresh: 0s
 ```
 
@@ -54,10 +56,10 @@ ip_camera_viewer:
   - id: security_cam_1
     url: "http://<host>:1984/api/stream.mjpeg?src=frigate1_esp32"
     protocol: mjpeg
-    width: 320
-    height: 240
+    width: 640
+    height: 480
     canvas_id: security_canvas
-    update_interval: 100ms
+    update_interval: 66ms
 ```
 
 ## MJPEG configuration (recommended)
@@ -81,8 +83,8 @@ ip_camera_viewer:
   - id: security_cam_1
     url: "http://<host>/api/stream.mjpeg?src=frigate1_esp32"
     protocol: mjpeg
-    width: 320
-    height: 240
+    width: 640
+    height: 480
     canvas_id: security_canvas
     update_interval: 100ms
 ```
@@ -126,8 +128,8 @@ lvgl:
       widgets:
         - canvas:
             id: security_canvas
-            width: 320
-            height: 240
+            width: 640
+            height: 480
             x: 10
             y: 10
             bg_color: 0x000000
@@ -321,8 +323,8 @@ ip_camera_viewer:
   - id: security_cam_1
     url: "rtsp://username:password@:554/stream2"
     protocol: rtsp   # "h264" is accepted as an alias
-    width: 320
-    height: 240
+    width: 640
+    height: 352
     canvas_id: security_canvas
     update_interval: 100ms
 ```
@@ -371,8 +373,8 @@ ip_camera_viewer:
   - id: security_cam_1
     url: "http://.....:1984/api/stream.mjpeg?src=cam1"
     protocol: mjpeg
-    width: 320
-    height: 240
+    width: 640
+    height: 480
     canvas_id: canvas1
 
   - id: security_cam_2
@@ -395,8 +397,8 @@ ip_camera_viewer:
   - id: security_cam_1
     url: "http://<host>/api/stream.mjpeg?src=cam1"
     protocol: mjpeg
-    width: 320
-    height: 240
+    width: 640
+    height: 480
     canvas_id: security_canvas
 
 switch:
@@ -497,7 +499,7 @@ logger:
 http://:1984/api/stream.mjpeg?src=frigate1_esp32
 
 # Test H264 with ffplay
-ffplay -rtsp_transport tcp rtsp://user:pass@192.168.1.56:554/stream2
+ffplay -rtsp_transport tcp rtsp://user:pass@1:554/stream2
 ```
 
 ## Resources
