@@ -113,6 +113,35 @@ class IPCameraViewer : public Component {
   // multicœur = mémoire faiblement ordonnée).
   std::atomic<bool> decode_frame_ready_{false};
 
+  // --- Arrêt propre AVEC libération mémoire (switch OFF) ---------------------
+  // La tâche de décodage peut être en plein travail (fetch/decode/convert) au
+  // moment du stop : libérer les buffers immédiatement = use-after-free.
+  // Handshake (seq_cst, pattern Dekker) :
+  //  - decode_run_ : consigne "tu peux travailler". Le stop la met à false.
+  //  - decode_task_idle_ : la tâche la met à false AVANT de toucher aux buffers
+  //    (puis re-vérifie decode_run_), à true quand elle se met en veille.
+  //  - pending_shutdown_ : le loop() re-tente à chaque tour ; dès que la tâche
+  //    est idle, il déconnecte et libère (buffers + DPB edge264, plusieurs Mo).
+  std::atomic<bool> decode_run_{true};
+  std::atomic<bool> decode_task_idle_{true};
+  bool pending_shutdown_{false};
+
+  // --- Conversion YUV->RGB565 matérielle (PPA du P4) --------------------------
+  // La conversion scalaire coûte ~40 ms/frame (dominée par le trafic PSRAM, en
+  // concurrence avec l'écran MIPI-DSI) et plafonne l'affichage à ~6-7 fps. Le
+  // bloc PPA sait convertir YUV420->RGB565 en DMA. Son format YUV420 matériel
+  // est packé par lignes (lignes paires "U Y Y U Y Y...", impaires "V Y Y...",
+  // cf. ESP_H264_RAW_FMT_O_UYY_E_VYY) : le repack depuis les plans I420 du DPB
+  // edge264 est FUSIONNÉ dans la copie de sortie du décodeur (coût ~équivalent
+  // aux memcpy qu'il remplace). Repli scalaire automatique si l'init PPA échoue,
+  // si les dimensions flux != config (letterbox), ou si une opération échoue.
+  void *ppa_client_{nullptr};   // ppa_client_handle_t (opaque pour l'en-tête)
+  uint8_t *ouyy_buffer_{nullptr};
+  bool ppa_ok_{false};
+  bool yuv_is_ouyy_{false};  // la frame en attente est au format O_UYY_E_VYY
+  void init_ppa_();
+  bool ppa_convert_(uint8_t *dst_rgb565);
+
   // JPEG receive buffer
   uint8_t *jpeg_buffer_{nullptr};
   size_t jpeg_buffer_size_{0};
@@ -176,6 +205,17 @@ class IPCameraViewer : public Component {
   // Sized well above one interleaved packet (4 + RTP<=1500).
   uint8_t rtp_acc_[8192]{0};
   size_t rtp_acc_len_{0};
+
+  // Régulateur de latence : quand le décodage ne suit plus le débit de la
+  // caméra (P-frames chargées : bruit IR nocturne, mouvement), le backlog TCP
+  // grossit sans limite -> flux "au ralenti" avec un retard qui s'accumule.
+  // Détection : socket saturé (FIONREAD + accumulateur > seuil) plusieurs
+  // contrôles de suite -> on jette les P-frames SANS les décoder jusqu'à la
+  // prochaine IDR (impossible de sauter une P isolée, elles se référencent en
+  // chaîne), puis reprise en direct. Latence bornée à ~1 GOP au pire.
+  bool catchup_skip_to_idr_{false};
+  uint32_t catchup_last_check_{0};
+  uint8_t catchup_full_ticks_{0};
 
   // H264 SPS/PPS caching (required for proper decoder initialization)
   uint8_t sps_cache_[128]{0};  // SPS cache (typically < 50 bytes)

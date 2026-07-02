@@ -73,8 +73,8 @@ bool H264HpDecoder::begin(int n_threads) {
   this->dec_ = edge264_alloc(n_threads, nullptr, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
   if (this->dec_ == nullptr && n_threads > 0) {
     ESP_LOGW(TAG,
-             "edge264_alloc(%d threads) a échoué (création des threads worker) — "
-             "repli en mono-thread.",
+             "edge264_alloc(%d threads) failed (worker thread creation) — falling "
+             "back to single-threaded mode.",
              n_threads);
     this->dec_ = edge264_alloc(0, nullptr, nullptr, 0, psram_alloc_cb, psram_free_cb, nullptr);
     if (this->dec_ != nullptr)
@@ -83,14 +83,14 @@ bool H264HpDecoder::begin(int n_threads) {
   if (this->dec_ == nullptr) {
     size_t ps_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     size_t in_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGE(TAG, "edge264_alloc a échoué même en mono-thread. PSRAM libre=%u INTERNE libre=%u",
+    ESP_LOGE(TAG, "edge264_alloc failed even single-threaded. Free PSRAM=%u free INTERNAL=%u",
              (unsigned) ps_free, (unsigned) in_free);
     return false;
   }
-  ESP_LOGI(TAG, "Décodeur H.264 High Profile prêt (edge264, %d thread(s))", n_threads);
+  ESP_LOGI(TAG, "H.264 High Profile decoder ready (edge264, %d thread(s))", n_threads);
   return true;
 #else
-  ESP_LOGE(TAG, "edge264 non vendorisé : ajoutez le sous-module et -DUSE_H264_HP_EDGE264 (voir README)");
+  ESP_LOGE(TAG, "edge264 not vendored: add the submodule and -DUSE_H264_HP_EDGE264 (see README)");
   (void) n_threads;
   return false;
 #endif
