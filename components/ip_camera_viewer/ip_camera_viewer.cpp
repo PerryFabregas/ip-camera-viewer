@@ -80,11 +80,11 @@ void IPCameraViewer::setup() {
                                             tskNO_AFFINITY);
     if (ok != pdPASS || this->decode_task_handle_ == nullptr) {
       this->decode_task_handle_ = nullptr;
-      ESP_LOGW(TAG, "Tâche de décodage dédiée NON créée (RAM interne ?) — décodage en "
-                    "ligne (LVGL peut geler pendant une I-frame). Libère de la RAM interne "
-                    "(ex. retire micro_wake_word) pour l'activer.");
+      ESP_LOGW(TAG, "Dedicated decode task NOT created (out of internal RAM?) — falling back "
+                    "to inline decoding (LVGL may freeze during I-frames). Free internal RAM "
+                    "(e.g. remove micro_wake_word) to enable it.");
     } else {
-      ESP_LOGI(TAG, "Tâche de décodage H.264 dédiée active — LVGL ne gèlera plus.");
+      ESP_LOGI(TAG, "Dedicated H.264 decode task running — LVGL will no longer freeze.");
     }
   }
 
@@ -145,7 +145,7 @@ void IPCameraViewer::decode_task_fn_(void *arg) {
         static uint32_t cv_n = 0;
         cv_acc += esp_timer_get_time() - _cv0;
         if (++cv_n == 64) {
-          ESP_LOGI(TAG, "Conversion YUV->RGB565 : %lld ms/frame (moyenne sur 64%s)",
+          ESP_LOGI(TAG, "YUV->RGB565 conversion: %lld ms/frame (64-frame average%s)",
                    (long long) (cv_acc / 64000),
                    (cam->yuv_is_ouyy_ && cam->ppa_ok_) ? ", PPA" : ", CPU");
           cv_acc = 0;
@@ -270,8 +270,8 @@ void IPCameraViewer::loop() {
       // sa frame en cours (au pire ~200-400 ms) puis se met en veille.
       this->decode_run_.store(false);
       this->pending_shutdown_ = true;
-      ESP_LOGI(TAG, "Arrêt demandé — attente de la fin de la frame en cours pour "
-                    "libérer la mémoire...");
+      ESP_LOGI(TAG, "Stop requested — waiting for the in-flight frame to finish before "
+                    "freeing memory...");
     } else {
       if (this->protocol_ == Protocol::MJPEG) {
         this->disconnect_mjpeg_stream_();
@@ -298,7 +298,11 @@ void IPCameraViewer::loop() {
       }
       this->free_buffers_();
       this->pending_shutdown_ = false;
-      ESP_LOGI(TAG, "IP Camera Viewer arrêté — mémoire libérée (PSRAM libre : %u Ko)",
+      // Invalidate the display handshake: a frame flagged "ready" would point
+      // into a buffer that was just freed; consuming it after re-enable would
+      // show stale/garbage pixels (and nothing must ever touch freed memory).
+      this->decode_frame_ready_.store(false, std::memory_order_release);
+      ESP_LOGI(TAG, "IP Camera Viewer stopped — memory freed (free PSRAM: %u KB)",
                (unsigned) (heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
     // sinon : on retente au prochain loop(), la tâche termine sa frame en cours
@@ -450,10 +454,10 @@ void IPCameraViewer::lvgl_timer_callback_(lv_timer_t *timer) {
           //  - errors == 0 & frames == 0 -> décode silencieux sans sortie (DPB / get_frame)
           //  - frames > 0 & displayed > 0 -> simple attente (décodage lent, ex. IDR)
           ESP_LOGW(TAG,
-                   "Pas de NOUVELLE frame H264 depuis %u ticks — affichées=%u, edge264: "
-                   "frames=%u, decode_errors=%u, started=%d. decode_errors qui monte -> "
-                   "feed NAL en cause ; frames=0 -> sortie get_frame ; sinon décodage "
-                   "lent (IDR en cours). (logger VERBOSE pour le détail par NAL)",
+                   "No NEW H264 frame for %u ticks — displayed=%u, edge264: frames=%u, "
+                   "decode_errors=%u, started=%d. Rising decode_errors -> NAL feed issue; "
+                   "frames=0 -> get_frame output; otherwise just a slow decode (IDR in "
+                   "progress). (VERBOSE logger for per-NAL detail)",
                    no_frame_count, cam->frame_count_, cam->hp_decoder_.frames_decoded(),
                    cam->hp_decoder_.decode_errors(), (int) cam->hp_started_);
         } else
@@ -479,14 +483,14 @@ void IPCameraViewer::init_ppa_() {
   ppa_client_handle_t client = nullptr;
   esp_err_t err = ppa_register_client(&cfg, &client);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "PPA indisponible (%s) — conversion YUV->RGB565 logicielle.",
+    ESP_LOGW(TAG, "PPA unavailable (%s) — using software YUV->RGB565 conversion.",
              esp_err_to_name(err));
     this->ppa_ok_ = false;
     return;
   }
   this->ppa_client_ = client;
   this->ppa_ok_ = true;
-  ESP_LOGI(TAG, "PPA prêt : conversion YUV420->RGB565 matérielle activée.");
+  ESP_LOGI(TAG, "PPA ready: hardware YUV420->RGB565 conversion enabled.");
 #else
   this->ppa_ok_ = false;
 #endif
@@ -517,7 +521,7 @@ bool IPCameraViewer::ppa_convert_(uint8_t *dst_rgb565) {
   esp_err_t err = ppa_do_scale_rotate_mirror((ppa_client_handle_t) this->ppa_client_, &op);
   if (err != ESP_OK) {
     // Échec (alignement, dimension...) : repli scalaire définitif, frame perdue.
-    ESP_LOGW(TAG, "PPA SRM en échec (%s) — repli sur la conversion logicielle.",
+    ESP_LOGW(TAG, "PPA SRM operation failed (%s) — falling back to software conversion.",
              esp_err_to_name(err));
     this->ppa_ok_ = false;
     return false;
@@ -1594,7 +1598,7 @@ bool IPCameraViewer::connect_rtsp_stream_() {
 #ifdef USE_H264_HP_EDGE264
           // edge264 gère Baseline/Main/High : on route ce flux vers lui.
           this->use_hp_decoder_ = true;
-          ESP_LOGI(TAG, "H264 %s profile -> décodage via edge264 (h264_hp, High Profile).", pname);
+          ESP_LOGI(TAG, "H264 %s profile -> decoding via edge264 (h264_hp, High Profile capable).", pname);
 #else
           ESP_LOGE(TAG, "This stream is H264 %s profile, but the ESP32-P4 software decoder "
                         "(tinyH264) only supports BASELINE. It will NOT decode (VLC works because "
@@ -1939,8 +1943,8 @@ bool IPCameraViewer::fetch_rtp_frame_() {
     if (!this->catchup_skip_to_idr_ && this->catchup_full_ticks_ >= 4) {
       this->catchup_skip_to_idr_ = true;
       this->h264_data_len_ = 0;  // jeter la frame partiellement assemblée
-      ESP_LOGW(TAG, "Décodage en retard sur la caméra (socket saturé >2 s) — saut des "
-                    "P-frames jusqu'à la prochaine IDR pour rester en direct.");
+      ESP_LOGW(TAG, "Decoder falling behind the camera (socket saturated >2 s) — skipping "
+                    "P-frames until the next IDR to stay live.");
     }
   }
 
@@ -1954,9 +1958,9 @@ bool IPCameraViewer::fetch_rtp_frame_() {
   static uint32_t d_pkts = 0, d_bytes = 0, d_ch0 = 0, d_markers = 0;
   static uint32_t d_nal_mask = 0;  // bit i = nal_type i vu
   d_calls++;
-  if (d_calls % 100 == 0) {
+  if (d_calls % 2000 == 0) {
     // NAL types RTP : 1=P,5=IDR,7=SPS,8=PPS,24=STAP-A,28=FU-A
-    ESP_LOGI(TAG,
+    ESP_LOGD(TAG,
              "RTP diag: calls=%u pkts=%u bytes=%u ch0=%u markers=%u | "
              "eagain=%u short=%u nondollar=%u | nal_mask=0x%08x",
              d_calls, d_pkts, d_bytes, d_ch0, d_markers, d_eagain, d_short,
@@ -2067,7 +2071,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
         memcpy(this->sps_cache_ + this->sps_len_, nal_data, nal_len);
         this->sps_len_ += nal_len;
         this->has_sps_ = true;
-        ESP_LOGI(TAG, "Cached SPS: %u bytes", this->sps_len_);
+        ESP_LOGD(TAG, "Cached SPS: %u bytes", this->sps_len_);
       }
       // Don't add SPS to main buffer - it will be prepended to I-frames
     } else if (nal_type == 8) {
@@ -2081,7 +2085,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
         memcpy(this->pps_cache_ + this->pps_len_, nal_data, nal_len);
         this->pps_len_ += nal_len;
         this->has_pps_ = true;
-        ESP_LOGI(TAG, "Cached PPS: %u bytes", this->pps_len_);
+        ESP_LOGD(TAG, "Cached PPS: %u bytes", this->pps_len_);
       }
       // Don't add PPS to main buffer - it will be prepended to I-frames
     } else if (nal_type >= 1 && nal_type <= 23) {
@@ -2100,11 +2104,11 @@ bool IPCameraViewer::fetch_rtp_frame_() {
             pend = 0;
           if ((size_t) pend + this->rtp_acc_len_ > 4096) {
             this->catchup_full_ticks_ = 3;
-            ESP_LOGI(TAG, "IDR décodée mais toujours en retard (%d octets en attente) — "
-                          "rattrapage maintenu.", pend);
+            ESP_LOGI(TAG, "IDR decoded but still behind (%d bytes pending) — catch-up kept "
+                          "active.", pend);
           } else {
             this->catchup_full_ticks_ = 0;
-            ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+            ESP_LOGI(TAG, "IDR reached — resuming live decoding.");
           }
         } else {
           continue;  // P-frame jetée (consommée du buffer, jamais décodée)
@@ -2184,7 +2188,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
           memcpy(this->sps_cache_ + this->sps_len_, unit, unit_size);
           this->sps_len_ += unit_size;
           this->has_sps_ = true;
-          ESP_LOGI(TAG, "Cached SPS from STAP-A: %u bytes", this->sps_len_);
+          ESP_LOGD(TAG, "Cached SPS from STAP-A: %u bytes", this->sps_len_);
         } else if (utype == 8 && unit_size + 4 <= (int) sizeof(this->pps_cache_)) {
           this->pps_len_ = 0;
           this->pps_cache_[this->pps_len_++] = 0x00;
@@ -2194,7 +2198,7 @@ bool IPCameraViewer::fetch_rtp_frame_() {
           memcpy(this->pps_cache_ + this->pps_len_, unit, unit_size);
           this->pps_len_ += unit_size;
           this->has_pps_ = true;
-          ESP_LOGI(TAG, "Cached PPS from STAP-A: %u bytes", this->pps_len_);
+          ESP_LOGD(TAG, "Cached PPS from STAP-A: %u bytes", this->pps_len_);
         } else if (this->h264_data_len_ + unit_size + 4 < this->h264_buffer_size_) {
           // Any other aggregated NAL (e.g. SEI): append with a start code
           this->h264_buffer_[this->h264_data_len_++] = 0x00;
@@ -2225,11 +2229,11 @@ bool IPCameraViewer::fetch_rtp_frame_() {
             pend = 0;
           if ((size_t) pend + this->rtp_acc_len_ > 4096) {
             this->catchup_full_ticks_ = 3;
-            ESP_LOGI(TAG, "IDR décodée mais toujours en retard (%d octets en attente) — "
-                          "rattrapage maintenu.", pend);
+            ESP_LOGI(TAG, "IDR decoded but still behind (%d bytes pending) — catch-up kept "
+                          "active.", pend);
           } else {
             this->catchup_full_ticks_ = 0;
-            ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+            ESP_LOGI(TAG, "IDR reached — resuming live decoding.");
           }
         } else {
           continue;  // fragment jeté (consommé du buffer, jamais décodé)
@@ -2328,7 +2332,7 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
       // loop_task_stack_size: 32768 dans la config esp32 (sinon débordement).
       this->hp_started_ = this->hp_decoder_.begin(0);
       if (!this->hp_started_) {
-        ESP_LOGE(TAG, "edge264: échec d'initialisation du décodeur High Profile");
+        ESP_LOGE(TAG, "edge264: High Profile decoder initialization failed");
         this->h264_data_len_ = 0;
         return false;
       }
@@ -2398,8 +2402,8 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
         if (sw != (int) this->width_ || sh != (int) this->height_) {
           static bool warned = false;
           if (!warned) {
-            ESP_LOGW(TAG, "edge264: flux %dx%d != config %ux%u — recadré/letterboxé. "
-                          "Ajuste width/height pour un rendu plein cadre.",
+            ESP_LOGW(TAG, "edge264: stream %dx%d != config %ux%u — cropped/letterboxed. "
+                          "Adjust width/height for full-frame rendering.",
                      sw, sh, this->width_, this->height_);
             warned = true;
           }
