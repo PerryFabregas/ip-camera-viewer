@@ -110,8 +110,21 @@ void IPCameraViewer::decode_task_fn_(void *arg) {
     if (cam->fetch_rtp_frame_()) {
       if (cam->decode_h264_to_yuv_() &&
           !cam->decode_frame_ready_.load(std::memory_order_acquire)) {
+        // DIAG : temps de conversion YUV->RGB565 moyenné sur 64 frames. C'est le
+        // 2e poste du pipeline après edge264 ; s'il domine, c'est lui qui plafonne
+        // les FPS (candidat à l'accélération PPA matérielle).
+        const int64_t _cv0 = esp_timer_get_time();
         cam->convert_yuv420_to_rgb565_(cam->yuv_buffer_, cam->current_decode_buffer_,
                                        cam->width_, cam->height_);
+        static int64_t cv_acc = 0;
+        static uint32_t cv_n = 0;
+        cv_acc += esp_timer_get_time() - _cv0;
+        if (++cv_n == 64) {
+          ESP_LOGI(TAG, "Conversion YUV->RGB565 : %lld ms/frame (moyenne sur 64)",
+                   (long long) (cv_acc / 64000));
+          cv_acc = 0;
+          cv_n = 0;
+        }
         // Release : la frame convertie dans current_decode_buffer_ est visible pour
         // le loopTask qui la lira après avoir vu decode_frame_ready_ == true.
         cam->decode_frame_ready_.store(true, std::memory_order_release);
@@ -1930,8 +1943,21 @@ bool IPCameraViewer::fetch_rtp_frame_() {
       if (this->catchup_skip_to_idr_) {
         if (nal_type == 5) {
           this->catchup_skip_to_idr_ = false;
-          this->catchup_full_ticks_ = 0;
-          ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+          // Backlog encore important ? On décode cette IDR (image fraîche) mais on
+          // se ré-arme en 0,5 s (au lieu de 2 s) pour sauter le gros du GOP suivant.
+          // Sans ça, reprendre le décodage COMPLET dès la première IDR re-dérivait
+          // aussitôt et la latence plafonnait à ~30-60 s au lieu de converger.
+          int pend = 0;
+          if (ioctl(this->rtsp_socket_, FIONREAD, &pend) < 0)
+            pend = 0;
+          if ((size_t) pend + this->rtp_acc_len_ > 4096) {
+            this->catchup_full_ticks_ = 3;
+            ESP_LOGI(TAG, "IDR décodée mais toujours en retard (%d octets en attente) — "
+                          "rattrapage maintenu.", pend);
+          } else {
+            this->catchup_full_ticks_ = 0;
+            ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+          }
         } else {
           continue;  // P-frame jetée (consommée du buffer, jamais décodée)
         }
@@ -2044,8 +2070,19 @@ bool IPCameraViewer::fetch_rtp_frame_() {
       if (this->catchup_skip_to_idr_) {
         if (start && fu_type == 5) {
           this->catchup_skip_to_idr_ = false;
-          this->catchup_full_ticks_ = 0;
-          ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+          // Voir le chemin NAL simple : IDR décodée, mais si le backlog persiste on
+          // se ré-arme en 0,5 s pour continuer à sauter les P du GOP suivant.
+          int pend = 0;
+          if (ioctl(this->rtsp_socket_, FIONREAD, &pend) < 0)
+            pend = 0;
+          if ((size_t) pend + this->rtp_acc_len_ > 4096) {
+            this->catchup_full_ticks_ = 3;
+            ESP_LOGI(TAG, "IDR décodée mais toujours en retard (%d octets en attente) — "
+                          "rattrapage maintenu.", pend);
+          } else {
+            this->catchup_full_ticks_ = 0;
+            ESP_LOGI(TAG, "IDR atteinte — reprise du décodage en direct.");
+          }
         } else {
           continue;  // fragment jeté (consommé du buffer, jamais décodé)
         }
@@ -2290,34 +2327,45 @@ void IPCameraViewer::convert_yuv420_to_rgb565_(uint8_t *yuv, uint8_t *rgb565, in
   // Y plane: width * height bytes
   // U plane: (width/2) * (height/2) bytes
   // V plane: (width/2) * (height/2) bytes
+  //
+  // Optimisé par blocs 2x2 : en 4:2:0 les 4 pixels d'un bloc partagent U/V, donc
+  // les trois termes chroma (rc/gc/bc) ne sont calculés qu'UNE fois par bloc au
+  // lieu d'une fois par pixel (3 multiplications économisées sur 4 pixels), et
+  // les deux lignes du bloc sont écrites dans la même passe (localité PSRAM).
+  // L'arithmétique par pixel est INCHANGÉE -> rendu strictement identique.
+  const int cw = width >> 1;
+  const uint8_t *y_plane = yuv;
+  const uint8_t *u_plane = yuv + width * height;
+  const uint8_t *v_plane = u_plane + cw * (height >> 1);
+  uint16_t *rgb = (uint16_t *) rgb565;
 
-  uint8_t *y_plane = yuv;
-  uint8_t *u_plane = yuv + width * height;
-  uint8_t *v_plane = u_plane + (width / 2) * (height / 2);
-
-  uint16_t *rgb = (uint16_t *)rgb565;
-
-  for (int j = 0; j < height; j++) {
-    for (int i = 0; i < width; i++) {
-      int y_idx = j * width + i;
-      int uv_idx = (j / 2) * (width / 2) + (i / 2);
-
-      int y = y_plane[y_idx];
-      int u = u_plane[uv_idx] - 128;
-      int v = v_plane[uv_idx] - 128;
-
-      // YUV to RGB conversion
-      int r = y + ((v * 359) >> 8);
-      int g = y - ((u * 88 + v * 183) >> 8);
-      int b = y + ((u * 454) >> 8);
-
-      // Clamp
-      r = r < 0 ? 0 : (r > 255 ? 255 : r);
-      g = g < 0 ? 0 : (g > 255 ? 255 : g);
-      b = b < 0 ? 0 : (b > 255 ? 255 : b);
-
-      // RGB565: RRRRR GGGGGG BBBBB
-      rgb[y_idx] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+  for (int j = 0; j < height; j += 2) {
+    const uint8_t *y0 = y_plane + j * width;
+    const uint8_t *y1 = y0 + width;
+    const uint8_t *up = u_plane + (j >> 1) * cw;
+    const uint8_t *vp = v_plane + (j >> 1) * cw;
+    uint16_t *d0 = rgb + j * width;
+    uint16_t *d1 = d0 + width;
+    for (int i = 0; i < width; i += 2) {
+      int u = up[i >> 1] - 128;
+      int v = vp[i >> 1] - 128;
+      int rc = (v * 359) >> 8;
+      int gc = (u * 88 + v * 183) >> 8;
+      int bc = (u * 454) >> 8;
+      for (int k = 0; k < 2; k++) {
+        int y = y0[i + k];
+        int r = y + rc, g = y - gc, b = y + bc;
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        g = g < 0 ? 0 : (g > 255 ? 255 : g);
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        d0[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+        y = y1[i + k];
+        r = y + rc, g = y - gc, b = y + bc;
+        r = r < 0 ? 0 : (r > 255 ? 255 : r);
+        g = g < 0 ? 0 : (g > 255 ? 255 : g);
+        b = b < 0 ? 0 : (b > 255 ? 255 : b);
+        d1[i + k] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+      }
     }
   }
 }
