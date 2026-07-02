@@ -1,6 +1,6 @@
-From e9faf158096a4dc32fccc8d9f0d516afea152c98 Mon Sep 17 00:00:00 2001
+From 8d573c9f1b1a2eae4c9a3bfc4e037b8f87743632 Mon Sep 17 00:00:00 2001
 From: youkorr <96953496+youkorr@users.noreply.github.com>
-Date: Thu, 2 Jul 2026 14:49:12 +0000
+Date: Thu, 2 Jul 2026 15:00:52 +0000
 Subject: [PATCH 2/3] riscv: scalar deblocking pipeline for SIMD-less ISAs
 
 On an ISA without a vector unit (RISC-V without V, e.g. ESP32-P4) the

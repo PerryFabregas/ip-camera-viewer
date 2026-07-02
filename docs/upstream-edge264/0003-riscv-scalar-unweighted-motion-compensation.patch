@@ -1,6 +1,6 @@
-From 2fc413221086a2a771160d1d90a080d5a8c59045 Mon Sep 17 00:00:00 2001
+From c6ff6e662d208db8aa38f60be16ce11d592c3bfa Mon Sep 17 00:00:00 2001
 From: youkorr <96953496+youkorr@users.noreply.github.com>
-Date: Thu, 2 Jul 2026 14:49:12 +0000
+Date: Thu, 2 Jul 2026 15:00:52 +0000
 Subject: [PATCH 3/3] riscv: scalar unweighted motion compensation
 
 The scalarized bilinear/6-tap interpolators are the second hotspot on
