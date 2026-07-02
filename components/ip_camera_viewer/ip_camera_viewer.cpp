@@ -342,6 +342,15 @@ void IPCameraViewer::check_network_quality_() {
 }
 
 void IPCameraViewer::adapt_to_network_() {
+  // RTSP : NE PAS toucher au timer d'affichage. Cette adaptation date du MJPEG,
+  // où le timer TIRE les données (moins de ticks = moins de bande passante). En
+  // RTSP le flux est POUSSÉ par la caméra : ralentir l'affichage n'économise
+  // rien — ça jette des frames décodées et ça bridait le FPS réel (l'utilisateur
+  // configure 33 ms, l'adaptation l'écrasait vers 66-100 ms). La régulation de
+  // charge H264 est assurée par le régulateur de latence du fetch.
+  if (this->protocol_ == Protocol::RTSP)
+    return;
+
   // Adapt update interval based on network quality
   // This reduces CPU load and network bandwidth on poor connections
   uint32_t old_interval = this->update_interval_;
@@ -2332,7 +2341,10 @@ bool IPCameraViewer::decode_h264_to_yuv_() {
     const int64_t _dec_t0 = esp_timer_get_time();
     this->hp_decoder_.decode_annexb(this->h264_buffer_, this->h264_data_len_);
     const int64_t _dec_us = esp_timer_get_time() - _dec_t0;
-    if (_dec_us > 3000)  // ne logge que les passes coûteuses (typiquement une IDR)
+    // Seuil 100 ms : ne logge que les IDR et les anomalies. L'ancien seuil de
+    // 3 ms loggait CHAQUE P-frame (~15 WARN/s) — le logger UART consommait un
+    // temps CPU mesurable ("logger took a long time") et noyait les logs utiles.
+    if (_dec_us > 100000)
       ESP_LOGW(TAG, "edge264 decode: %lld ms pour %u octets (%u MB config)",
                (long long) (_dec_us / 1000), (unsigned) this->h264_data_len_,
                (unsigned) ((this->width_ / 16) * (this->height_ / 16)));
