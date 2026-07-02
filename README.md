@@ -86,7 +86,7 @@ ip_camera_viewer:
     width: 640
     height: 480
     canvas_id: security_canvas
-    update_interval: 100ms
+    update_interval: 66ms
 ```
 
 **Why MJPEG?**
