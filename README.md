@@ -344,7 +344,7 @@ containing `@` is handled correctly.
 go2rtc:
   streams:
     frigate1:
-      - rtsp://username:password@192.168.1.56:554/stream1
+      - rtsp://username:password@......:554/stream1
 ```
 
 **H264 limitations (important):**
@@ -369,14 +369,14 @@ ESP32-P4 hardware JPEG decoder — fast and reliable), or have go2rtc/ffmpeg
 ```yaml
 ip_camera_viewer:
   - id: security_cam_1
-    url: "http://192.168.1.38:1984/api/stream.mjpeg?src=cam1"
+    url: "http://.....:1984/api/stream.mjpeg?src=cam1"
     protocol: mjpeg
     width: 320
     height: 240
     canvas_id: canvas1
 
   - id: security_cam_2
-    url: "http://192.168.1.38:1984/api/stream.mjpeg?src=cam2"
+    url: "http://.....:1984/api/stream.mjpeg?src=cam2"
     protocol: mjpeg
     width: 320
     height: 240
