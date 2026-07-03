@@ -321,7 +321,7 @@ on_click:
 ```yaml
 ip_camera_viewer:
   - id: security_cam_1
-    url: "rtsp://username:password@:554/stream2"
+    url: "rtsp://username:password@:ip-camera/stream2"
     protocol: rtsp   # "h264" is accepted as an alias
     width: 640
     height: 352
@@ -346,7 +346,7 @@ containing `@` is handled correctly.
 go2rtc:
   streams:
     frigate1:
-      - rtsp://username:password@......:554/stream1
+      - rtsp://username:password@ip-camera/stream1
 ```
 
 **H264 limitations (important):**
@@ -371,14 +371,14 @@ ESP32-P4 hardware JPEG decoder — fast and reliable), or have go2rtc/ffmpeg
 ```yaml
 ip_camera_viewer:
   - id: security_cam_1
-    url: "http://.....:1984/api/stream.mjpeg?src=cam1"
+    url: "http://HA:1984/api/stream.mjpeg?src=cam1"
     protocol: mjpeg
     width: 640
     height: 480
     canvas_id: canvas1
 
   - id: security_cam_2
-    url: "http://.....:1984/api/stream.mjpeg?src=cam2"
+    url: "http://HA:1984/api/stream.mjpeg?src=cam2"
     protocol: mjpeg
     width: 320
     height: 240
