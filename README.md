@@ -496,7 +496,7 @@ logger:
 
 ```bash
 # Test MJPEG in a browser
-http://:1984/api/stream.mjpeg?src=frigate1_esp32
+http://HA:1984/api/stream.mjpeg?src=frigate1_esp32
 
 # Test H264 with ffplay
 ffplay -rtsp_transport tcp rtsp://user:pass@1:554/stream2
