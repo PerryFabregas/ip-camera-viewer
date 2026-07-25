@@ -940,8 +940,23 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   this->parse_buffer_len_ += read_len;
 
   // Parse MJPEG stream - look for JPEG markers
+  //
+  // LATENCY FIX: the original version returned as soon as it found ONE
+  // complete frame, even if another complete frame was already sitting
+  // right behind it in the buffer (e.g. after a network hiccup or a
+  // momentarily large frame let a backlog build up). Since nothing else
+  // in this code path ever catches up, that backlog became a permanent,
+  // constant display lag - once behind, always behind.
+  //
+  // Fix: keep scanning after finding a complete frame. If another full
+  // frame is already available, discard the one we just finished (it's
+  // stale) and keep going. Only the LAST complete frame found in this
+  // call is kept, so a tick that catches up on backlog jumps straight to
+  // the most current image instead of playing through every frame it
+  // missed one-at-a-time.
+  bool got_frame = false;
   size_t i = 0;
-  while (i < this->parse_buffer_len_ - 1) {
+  while (this->parse_buffer_len_ >= 2 && i < this->parse_buffer_len_ - 1) {
     if (this->mjpeg_state_ == MjpegState::SEARCHING_BOUNDARY) {
       // Look for JPEG start marker (FFD8)
       if (this->parse_buffer_[i] == 0xFF && this->parse_buffer_[i + 1] == 0xD8) {
@@ -972,7 +987,12 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
           this->first_update_ = false;
         }
 
-        return true;
+        got_frame = true;
+        // Restart the scan from the top of the (now-shifted) buffer instead
+        // of returning immediately, so a backlogged second frame gets
+        // caught in the same call rather than waiting for the next tick.
+        i = 0;
+        continue;
       }
 
       if (this->jpeg_data_len_ < this->jpeg_buffer_size_) {
@@ -984,6 +1004,10 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
       }
       i++;
     }
+  }
+
+  if (got_frame) {
+    return true;
   }
 
   if (i < this->parse_buffer_len_ && this->mjpeg_state_ == MjpegState::SEARCHING_BOUNDARY) {
