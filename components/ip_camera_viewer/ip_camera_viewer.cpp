@@ -939,22 +939,16 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   memcpy(this->parse_buffer_ + this->parse_buffer_len_, temp_buffer, read_len);
   this->parse_buffer_len_ += read_len;
 
-  // Parse MJPEG stream - look for JPEG markers
-  //
-  // LATENCY FIX: the original version returned as soon as it found ONE
-  // complete frame, even if another complete frame was already sitting
-  // right behind it in the buffer (e.g. after a network hiccup or a
-  // momentarily large frame let a backlog build up). Since nothing else
-  // in this code path ever catches up, that backlog became a permanent,
-  // constant display lag - once behind, always behind.
-  //
-  // Fix: keep scanning after finding a complete frame. If another full
-  // frame is already available, discard the one we just finished (it's
-  // stale) and keep going. Only the LAST complete frame found in this
-  // call is kept, so a tick that catches up on backlog jumps straight to
-  // the most current image instead of playing through every frame it
-  // missed one-at-a-time.
-  bool got_frame = false;
+  // Parse MJPEG stream - look for JPEG markers.
+  // This first pass is IDENTICAL to the original single-frame parser: it
+  // finds one complete frame and writes it into jpeg_buffer_, exactly as
+  // before. (An earlier version of this patch tried to keep scanning and
+  // writing directly into jpeg_buffer_ here to catch backlog in the same
+  // call - that was wrong: it could start overwriting a good, complete
+  // frame with an INCOMPLETE next one and still report success. That bug
+  // is why frames were coming back corrupted. The catch-up logic now lives
+  // entirely in the read-only peek phase below, which never touches
+  // jpeg_buffer_ until a full replacement frame is confirmed to exist.)
   size_t i = 0;
   while (this->parse_buffer_len_ >= 2 && i < this->parse_buffer_len_ - 1) {
     if (this->mjpeg_state_ == MjpegState::SEARCHING_BOUNDARY) {
@@ -987,12 +981,7 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
           this->first_update_ = false;
         }
 
-        got_frame = true;
-        // Restart the scan from the top of the (now-shifted) buffer instead
-        // of returning immediately, so a backlogged second frame gets
-        // caught in the same call rather than waiting for the next tick.
-        i = 0;
-        continue;
+        goto found_one_frame;
       }
 
       if (this->jpeg_data_len_ < this->jpeg_buffer_size_) {
@@ -1006,10 +995,6 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
     }
   }
 
-  if (got_frame) {
-    return true;
-  }
-
   if (i < this->parse_buffer_len_ && this->mjpeg_state_ == MjpegState::SEARCHING_BOUNDARY) {
     size_t remaining = this->parse_buffer_len_ - i;
     memmove(this->parse_buffer_, this->parse_buffer_ + i, remaining);
@@ -1017,6 +1002,79 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   }
 
   return false;
+
+found_one_frame:
+  // LATENCY FIX (read-only peek): we have one complete, correctly-copied
+  // frame in jpeg_buffer_. Before returning it, check whether the leftover
+  // bytes in parse_buffer_ ALREADY contain another complete frame (this
+  // happens when catching up on backlog - several frames can already be
+  // sitting in memory at once). This only reads parse_buffer_ to look for
+  // a full FFD8...FFD9 pair; it never touches jpeg_buffer_ unless a
+  // complete pair is actually found, so the frame we already have is never
+  // put at risk of being left half-overwritten.
+  for (;;) {
+    if (this->parse_buffer_len_ < 4) break;
+
+    size_t start = 0;
+    bool found_start = false;
+    while (start < this->parse_buffer_len_ - 1) {
+      if (this->parse_buffer_[start] == 0xFF && this->parse_buffer_[start + 1] == 0xD8) {
+        found_start = true;
+        break;
+      }
+      start++;
+    }
+    if (!found_start) break;  // no next frame start in what we have - stop, keep current frame
+
+    size_t end = start + 2;
+    bool found_end = false;
+    while (end < this->parse_buffer_len_ - 1) {
+      if (this->parse_buffer_[end] == 0xFF && this->parse_buffer_[end + 1] == 0xD9) {
+        found_end = true;
+        break;
+      }
+      end++;
+    }
+    if (!found_end) {
+      // Next frame has started but isn't complete yet in what we've read so
+      // far - leave it (and only it, dropping any junk before its FFD8) in
+      // parse_buffer_ for the normal SEARCHING_BOUNDARY/READING_CONTENT
+      // state machine to pick up on the next call, exactly as it would if
+      // this peek phase didn't exist.
+      if (start > 0) {
+        memmove(this->parse_buffer_, this->parse_buffer_ + start, this->parse_buffer_len_ - start);
+        this->parse_buffer_len_ -= start;
+      }
+      // Leave mjpeg_state_ as SEARCHING_BOUNDARY (already set above when the
+      // current frame's FFD9 was found). The partial next frame's FFD8 is
+      // now sitting at the very front of parse_buffer_, so the normal scan
+      // loop will find and correctly transition it into jpeg_buffer_ on the
+      // next call - no need to duplicate that logic here.
+      break;
+    }
+
+    // A full next frame exists already. Confirmed complete - safe to commit.
+    size_t frame_len = (end + 2) - start;
+    if (frame_len <= this->jpeg_buffer_size_) {
+      memcpy(this->jpeg_buffer_, this->parse_buffer_ + start, frame_len);
+      this->jpeg_data_len_ = frame_len;
+    } else {
+      ESP_LOGW(TAG, "Skipped oversized buffered frame (%u bytes) while catching up", (unsigned) frame_len);
+      // Too big to fit - skip it (keep whatever frame we already have committed) but still
+      // consume it from parse_buffer_ so we don't loop on it forever.
+    }
+
+    size_t consumed = end + 2;
+    size_t remaining = this->parse_buffer_len_ - consumed;
+    if (remaining > 0) {
+      memmove(this->parse_buffer_, this->parse_buffer_ + consumed, remaining);
+    }
+    this->parse_buffer_len_ = remaining;
+    this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
+    // Loop again: maybe yet another complete frame is queued up behind this one.
+  }
+
+  return true;
 }
 
 // Strip ALL unsupported markers from JPEG for ESP32-P4 hardware decoder
