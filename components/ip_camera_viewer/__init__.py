@@ -15,6 +15,7 @@ CONF_UPDATE_INTERVAL = "update_interval"
 CONF_WIDTH = "width"
 CONF_HEIGHT = "height"
 CONF_PROTOCOL = "protocol"
+CONF_RECONNECT_INTERVAL = "reconnect_interval"
 
 ip_camera_viewer_ns = cg.esphome_ns.namespace("ip_camera_viewer")
 IPCameraViewer = ip_camera_viewer_ns.class_("IPCameraViewer", cg.Component)
@@ -46,6 +47,15 @@ IP_CAMERA_VIEWER_SCHEMA = cv.All(cv.Schema({
     cv.Required(CONF_HEIGHT): cv.int_range(min=16, max=1080),
     cv.Optional(CONF_PROTOCOL, default="mjpeg"): cv.one_of("mjpeg", "rtsp", "h264", lower=True),
     cv.Optional(CONF_UPDATE_INTERVAL, default="100ms"): cv.positive_time_period_milliseconds,
+    # Periodic full reconnect, mainly to reset WiFi/decoder state. Every
+    # reconnect also makes go2rtc re-warm its ffmpeg producer from cold if
+    # this device is the only viewer of that stream - that warmup (RTSP
+    # connect + encode start) commonly takes a few seconds, during which a
+    # backlog can build up and show as several seconds of display lag right
+    # after each reconnect. Lengthening this trades "resets state less often"
+    # for "eats that warmup penalty less often." Default matches the
+    # original hardcoded 180s.
+    cv.Optional(CONF_RECONNECT_INTERVAL, default="180s"): cv.positive_time_period_milliseconds,
 }).extend(cv.COMPONENT_SCHEMA), _validate_url_protocol)
 
 # Support multiple cameras as a list
@@ -81,3 +91,6 @@ async def to_code(config):
 
         update_interval_ms = cam_config[CONF_UPDATE_INTERVAL].total_milliseconds
         cg.add(var.set_update_interval(int(update_interval_ms)))
+
+        reconnect_interval_ms = cam_config[CONF_RECONNECT_INTERVAL].total_milliseconds
+        cg.add(var.set_reconnect_interval(int(reconnect_interval_ms)))
