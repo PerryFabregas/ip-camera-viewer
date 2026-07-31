@@ -876,7 +876,12 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
     ESP_LOGI(TAG, "Periodic reconnect after %u seconds - resetting WiFi and decoder state",
              (now - this->stream_connect_time_) / 1000);
     this->disconnect_mjpeg_stream_();
-    delay(500);  // Let WiFi fully reset
+    // Was delay(500) - fine for the original 180-600s interval, but this is
+    // now also used as a short-interval "always latest" mechanism (a few
+    // seconds), where 500ms blocked out of every few seconds adds up to
+    // real, noticeable UI lag. 50ms still gives the WiFi stack a brief beat
+    // to settle without eating a large chunk of every cycle.
+    delay(50);
     if (this->connect_mjpeg_stream_()) {
       ESP_LOGI(TAG, "Stream reconnected successfully");
     } else {
@@ -939,53 +944,20 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   memcpy(this->parse_buffer_ + this->parse_buffer_len_, temp_buffer, read_len);
   this->parse_buffer_len_ += read_len;
 
-  // LATENCY FIX (opportunistic multi-read): the read above pulled at most
-  // one 16KB chunk, same as before. If go2rtc has backlog queued up, one
-  // chunk per tick isn't enough to ever catch up - the peek phase below can
-  // only skip through frames it can actually see, and it can't see past
-  // what's been read into parse_buffer_.
-  //
-  // Keep reading MORE chunks in this same call, but ONLY when the read we
-  // just did came back completely full (== CHUNK_SIZE). A full read is
-  // strong evidence more data was already sitting there ready to go; it is
-  // never a guess. The moment a read comes back partial or empty, we stop.
-  // This means esp_http_client_read() is never called speculatively when
-  // nothing is known to be waiting, so this cannot introduce a new
-  // multi-second blocking stall on an otherwise-idle connection - the exact
-  // risk that held this optimization back originally.
-  static const int MAX_EXTRA_READS = 8;  // cap: up to 9 x 16KB = 144KB/tick
-  int extra_reads = 0;
-  while (read_len == (int) CHUNK_SIZE && extra_reads < MAX_EXTRA_READS) {
-    read_len = esp_http_client_read(this->http_client_, (char *)temp_buffer, sizeof(temp_buffer));
-    if (read_len < 0) {
-      ESP_LOGE(TAG, "Stream read error");
-      this->disconnect_mjpeg_stream_();
-      return false;
-    }
-    if (read_len == 0) {
-      break;
-    }
-
-    total_bytes_read += read_len;
-    if (total_bytes_read >= 64 * 1024) {
-      taskYIELD();
-      total_bytes_read = 0;
-    }
-
-    if (this->parse_buffer_len_ + read_len > this->parse_buffer_size_) {
-      static uint32_t overflow_count2 = 0;
-      if (overflow_count2++ < 5) {
-        ESP_LOGW(TAG, "Parse buffer overflow (%u + %d > %u) - discarding corrupted frame, resetting to search for next JPEG",
-                 this->parse_buffer_len_, read_len, this->parse_buffer_size_);
-      }
-      this->parse_buffer_len_ = 0;
-      this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
-      this->jpeg_data_len_ = 0;
-    }
-    memcpy(this->parse_buffer_ + this->parse_buffer_len_, temp_buffer, read_len);
-    this->parse_buffer_len_ += read_len;
-    extra_reads++;
-  }
+  // NOTE: an earlier version of this patch tried opportunistically reading
+  // several more 16KB chunks per tick here (only when the previous read
+  // came back completely full, as a heuristic for "more data is already
+  // waiting"). That was reverted: in real-world testing it occasionally
+  // still hit esp_http_client_read() blocking for several seconds, because
+  // "the previous read was full" is a heuristic, not a guarantee - and
+  // esp_http_client doesn't expose the underlying socket, so there's no way
+  // to actually confirm data is ready without risking exactly that block.
+  // The full-device freeze (touchscreen/backlight/LVGL all stalling
+  // together) that caused is worse than slower backlog catch-up, so this
+  // sticks to exactly one read per tick, same as the original component.
+  // The peek phase below still safely skips ahead to the newest frame
+  // already sitting in whatever was read - it just does so more gradually
+  // when backlog is deep, across multiple ticks instead of one.
 
   // Parse MJPEG stream - look for JPEG markers.
   // This first pass is IDENTICAL to the original single-frame parser: it
