@@ -862,6 +862,21 @@ void IPCameraViewer::disconnect_mjpeg_stream_() {
     this->http_client_ = nullptr;
   }
   this->stream_connected_ = false;
+
+  // BUG FIX: a reconnect opens a brand-new TCP connection, but without this,
+  // the MJPEG parser's state (parse_buffer_len_, mjpeg_state_, jpeg_data_len_)
+  // carried over unchanged from the OLD connection. The first bytes of the
+  // new stream were then parsed using leftover context from wherever the old
+  // one left off mid-frame - guaranteed to desync until the parser happened
+  // to stumble onto a fresh, valid FFD8...FFD9 boundary a few tries later.
+  // This is what caused the cluster of "marker not supported"/"buffer
+  // overflow" errors seen right after every single reconnect: the source
+  // JPEG data itself was confirmed clean (byte-level inspection of the
+  // actual stream), so those errors could only have been coming from us
+  // handing the hardware decoder a mis-aligned buffer.
+  this->parse_buffer_len_ = 0;
+  this->jpeg_data_len_ = 0;
+  this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
 }
 
 bool IPCameraViewer::fetch_jpeg_frame_() {
