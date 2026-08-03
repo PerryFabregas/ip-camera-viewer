@@ -16,6 +16,7 @@ CONF_WIDTH = "width"
 CONF_HEIGHT = "height"
 CONF_PROTOCOL = "protocol"
 CONF_RECONNECT_INTERVAL = "reconnect_interval"
+CONF_JPEG_BUFFER_SIZE = "jpeg_buffer_size"
 
 ip_camera_viewer_ns = cg.esphome_ns.namespace("ip_camera_viewer")
 IPCameraViewer = ip_camera_viewer_ns.class_("IPCameraViewer", cg.Component)
@@ -56,6 +57,13 @@ IP_CAMERA_VIEWER_SCHEMA = cv.All(cv.Schema({
     # for "eats that warmup penalty less often." Default matches the
     # original hardcoded 180s.
     cv.Optional(CONF_RECONNECT_INTERVAL, default="180s"): cv.positive_time_period_milliseconds,
+    # Overrides the adaptive JPEG buffer sizing (which picks 128KB/256KB/512KB
+    # based on resolution tiers). Set this if you're seeing "JPEG buffer
+    # overflow" and have PSRAM to spare - e.g. 262144 (256KB) gives real
+    # headroom for busy/detailed 640x480 frames that occasionally exceed the
+    # default 128KB tier. Value is in raw bytes. Leave unset to keep the
+    # automatic tiered sizing.
+    cv.Optional(CONF_JPEG_BUFFER_SIZE): cv.int_range(min=16 * 1024, max=2 * 1024 * 1024),
 }).extend(cv.COMPONENT_SCHEMA), _validate_url_protocol)
 
 # Support multiple cameras as a list
@@ -94,3 +102,6 @@ async def to_code(config):
 
         reconnect_interval_ms = cam_config[CONF_RECONNECT_INTERVAL].total_milliseconds
         cg.add(var.set_reconnect_interval(int(reconnect_interval_ms)))
+
+        if CONF_JPEG_BUFFER_SIZE in cam_config:
+            cg.add(var.set_jpeg_buffer_size_override(cam_config[CONF_JPEG_BUFFER_SIZE]))
