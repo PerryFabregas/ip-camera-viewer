@@ -869,7 +869,6 @@ void IPCameraViewer::disconnect_mjpeg_stream_() {
     this->http_client_ = nullptr;
   }
   this->stream_connected_ = false;
-
   // BUG FIX: a reconnect opens a brand-new TCP connection, but without this,
   // the MJPEG parser's state (parse_buffer_len_, mjpeg_state_, jpeg_data_len_)
   // carried over unchanged from the OLD connection. The first bytes of the
