@@ -569,17 +569,24 @@ bool IPCameraViewer::init_buffers_() {
     // 640x480 (307K pixels): 128KB buffer
     // 1280x720 (922K pixels): 256KB buffer
     // 1920x1080+ (2M+ pixels): 512KB buffer
-    uint32_t pixel_count = this->width_ * this->height_;
-    if (pixel_count <= 640 * 480) {
-      this->jpeg_buffer_size_ = 128 * 1024;  // 128KB for small resolution
-    } else if (pixel_count <= 1280 * 720) {
-      this->jpeg_buffer_size_ = 256 * 1024;  // 256KB for medium resolution
+    // Overridden entirely if jpeg_buffer_size_override_ was set via the
+    // jpeg_buffer_size YAML option (0 = not set, use the tiers below).
+    if (this->jpeg_buffer_size_override_ > 0) {
+      this->jpeg_buffer_size_ = this->jpeg_buffer_size_override_;
     } else {
-      this->jpeg_buffer_size_ = 512 * 1024;  // 512KB for large resolution
+      uint32_t pixel_count = this->width_ * this->height_;
+      if (pixel_count <= 640 * 480) {
+        this->jpeg_buffer_size_ = 128 * 1024;  // 128KB for small resolution
+      } else if (pixel_count <= 1280 * 720) {
+        this->jpeg_buffer_size_ = 256 * 1024;  // 256KB for medium resolution
+      } else {
+        this->jpeg_buffer_size_ = 512 * 1024;  // 512KB for large resolution
+      }
     }
 
-    ESP_LOGI(TAG, "Adaptive JPEG buffer size for %ux%u: %u bytes",
-             this->width_, this->height_, this->jpeg_buffer_size_);
+    ESP_LOGI(TAG, "JPEG buffer size for %ux%u: %u bytes%s",
+             this->width_, this->height_, this->jpeg_buffer_size_,
+             this->jpeg_buffer_size_override_ > 0 ? " (manual override)" : " (adaptive default)");
 
     // OPTIMIZATION: PSRAM-first allocation strategy with fallback (from webdavbox3)
     bool using_psram = false;
