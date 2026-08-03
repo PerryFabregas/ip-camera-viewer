@@ -44,6 +44,7 @@ class IPCameraViewer : public Component {
   void set_height(uint16_t height) { this->height_ = height; }
   void set_update_interval(uint32_t interval_ms) { this->update_interval_ = interval_ms; }
   void set_reconnect_interval(uint32_t interval_ms) { this->stream_reconnect_interval_ = interval_ms; }
+  void set_jpeg_buffer_size_override(size_t bytes) { this->jpeg_buffer_size_override_ = bytes; }
   void set_enabled(bool enabled) { this->enabled_ = enabled; }
   void set_protocol(const std::string &protocol) {
     // "rtsp" and "h264" are aliases for the same RTSP/H.264 path
@@ -158,6 +159,7 @@ class IPCameraViewer : public Component {
   bool stream_connected_{false};
   uint32_t stream_connect_time_{0};  // Time when stream was connected
   uint32_t stream_reconnect_interval_{180000};  // Reconnect every 3 minutes (180 seconds)
+  size_t jpeg_buffer_size_override_{0};  // 0 = use adaptive tiered sizing
 
   // MJPEG parsing state
   enum class MjpegState {
