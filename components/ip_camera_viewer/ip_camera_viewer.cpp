@@ -852,6 +852,23 @@ bool IPCameraViewer::connect_mjpeg_stream_() {
   // - Read chunks: 16KB
   ESP_LOGI(TAG, "MJPEG stream connected (HTTP buffer: 128KB, JPEG buffer: %u bytes)", this->jpeg_buffer_size_);
 
+  // LATENCY FIX: the 5000ms timeout above is what connect/fetch_headers
+  // actually needs on this hardware (~2.4-2.7s measured) - but that same
+  // timeout also governs every ongoing esp_http_client_read() call once
+  // streaming. That's what made an earlier "read a bit more per tick if
+  // data looks ready" optimization dangerous: a wrong guess could block for
+  // up to the full 5 seconds, freezing the whole device (touchscreen,
+  // backlight, everything shares this loop).
+  //
+  // esp_http_client_set_timeout_ms() can change the timeout on an
+  // already-open connection without recreating it - so now that the
+  // connection is live, shrink it dramatically for the read phase. Normal
+  // LAN reads complete in well under this; a genuinely stalled read now
+  // fails fast and cleanly (triggering the existing "Stream read error" ->
+  // reconnect path, itself now safe since reconnect properly resets parser
+  // state) instead of hanging the device for seconds.
+  esp_http_client_set_timeout_ms(this->http_client_, 300);
+
   this->stream_connected_ = true;
   this->stream_connect_time_ = millis();  // Record connection time
   this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
@@ -966,20 +983,54 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   memcpy(this->parse_buffer_ + this->parse_buffer_len_, temp_buffer, read_len);
   this->parse_buffer_len_ += read_len;
 
-  // NOTE: an earlier version of this patch tried opportunistically reading
-  // several more 16KB chunks per tick here (only when the previous read
-  // came back completely full, as a heuristic for "more data is already
-  // waiting"). That was reverted: in real-world testing it occasionally
-  // still hit esp_http_client_read() blocking for several seconds, because
-  // "the previous read was full" is a heuristic, not a guarantee - and
-  // esp_http_client doesn't expose the underlying socket, so there's no way
-  // to actually confirm data is ready without risking exactly that block.
-  // The full-device freeze (touchscreen/backlight/LVGL all stalling
-  // together) that caused is worse than slower backlog catch-up, so this
-  // sticks to exactly one read per tick, same as the original component.
-  // The peek phase below still safely skips ahead to the newest frame
-  // already sitting in whatever was read - it just does so more gradually
-  // when backlog is deep, across multiple ticks instead of one.
+  // LATENCY FIX (opportunistic multi-read, safe version): a previous
+  // attempt at this was reverted because a wrong "more data is ready"
+  // guess could block esp_http_client_read() for up to the connection's
+  // full 5-second timeout, freezing the whole device. That's fixed now:
+  // connect_mjpeg_stream_() shrinks the timeout to 300ms via
+  // esp_http_client_set_timeout_ms() right after the connection is
+  // established, specifically so the read phase can't block anywhere near
+  // that long. A wrong guess here now costs at most ~300ms before failing
+  // fast into the existing "Stream read error" -> reconnect path (itself
+  // safe, since reconnect properly resets parser state) - not a multi-
+  // second freeze. Combined with the "previous read was full" heuristic
+  // below (still worth keeping, to avoid burning even 300ms on guesses
+  // that are usually wrong), this lets a single tick drain and skip ahead
+  // through real backlog when it exists, instead of crawling through it
+  // one 16KB chunk per tick.
+  static const int MAX_EXTRA_READS = 8;  // cap: up to 9 x 16KB = 144KB/tick
+  int extra_reads = 0;
+  while (read_len == (int) CHUNK_SIZE && extra_reads < MAX_EXTRA_READS) {
+    read_len = esp_http_client_read(this->http_client_, (char *)temp_buffer, sizeof(temp_buffer));
+    if (read_len < 0) {
+      ESP_LOGE(TAG, "Stream read error");
+      this->disconnect_mjpeg_stream_();
+      return false;
+    }
+    if (read_len == 0) {
+      break;
+    }
+
+    total_bytes_read += read_len;
+    if (total_bytes_read >= 64 * 1024) {
+      taskYIELD();
+      total_bytes_read = 0;
+    }
+
+    if (this->parse_buffer_len_ + read_len > this->parse_buffer_size_) {
+      static uint32_t overflow_count2 = 0;
+      if (overflow_count2++ < 5) {
+        ESP_LOGW(TAG, "Parse buffer overflow (%u + %d > %u) - discarding corrupted frame, resetting to search for next JPEG",
+                 this->parse_buffer_len_, read_len, this->parse_buffer_size_);
+      }
+      this->parse_buffer_len_ = 0;
+      this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
+      this->jpeg_data_len_ = 0;
+    }
+    memcpy(this->parse_buffer_ + this->parse_buffer_len_, temp_buffer, read_len);
+    this->parse_buffer_len_ += read_len;
+    extra_reads++;
+  }
 
   // Parse MJPEG stream - look for JPEG markers.
   // This first pass is IDENTICAL to the original single-frame parser: it
