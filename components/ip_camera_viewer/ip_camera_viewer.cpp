@@ -998,7 +998,17 @@ bool IPCameraViewer::fetch_jpeg_frame_() {
   // that are usually wrong), this lets a single tick drain and skip ahead
   // through real backlog when it exists, instead of crawling through it
   // one 16KB chunk per tick.
-  static const int MAX_EXTRA_READS = 8;  // cap: up to 9 x 16KB = 144KB/tick
+  static const int MAX_EXTRA_READS = 2;  // cap: up to 3 x 16KB = 48KB/tick - cut down
+  // from 8 (144KB/tick). The bigger cap let a single tick drain more backlog
+  // in one go, but the byte-by-byte peek-scan afterward (looking for frame
+  // boundaries across everything just read) is real synchronous CPU work
+  // done in the same loop that services touch polling. Even when no single
+  // tick was slow enough to trip the "took a long time" warning, doing that
+  // much scanning ~7 times/second was very likely the actual cause of touch
+  // feeling chronically unresponsive - the warning log undercounts this
+  // because its threshold ratchets up permanently after the first big spike,
+  // so plenty of meaningful-but-smaller stalls since then never got logged
+  // at all.
   int extra_reads = 0;
   while (read_len == (int) CHUNK_SIZE && extra_reads < MAX_EXTRA_READS) {
     read_len = esp_http_client_read(this->http_client_, (char *)temp_buffer, sizeof(temp_buffer));
@@ -1164,6 +1174,13 @@ found_one_frame:
     }
     this->parse_buffer_len_ = remaining;
     this->mjpeg_state_ = MjpegState::SEARCHING_BOUNDARY;
+    // Yield here (safe point - between frame commits, not mid-scan) in case
+    // several small frames were found in this tick. Keeps a burst of
+    // several outer-loop iterations from monopolizing the CPU in one
+    // unbroken block, even though the MAX_EXTRA_READS cap above already
+    // limits how much data (and therefore how many frames) can be found
+    // per tick in the first place.
+    taskYIELD();
     // Loop again: maybe yet another complete frame is queued up behind this one.
   }
 
